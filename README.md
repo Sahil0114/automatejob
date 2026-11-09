@@ -152,12 +152,36 @@ Discovered companies are stored in `data/companies.db` (separate from
 
 ## Candidate profile & answer bank
 
-`data/candidate_profile.toml` and `data/answer_bank.toml` hold the verified
-factual foundation (portfolio, technologies, target roles, location and
-employment preferences) plus reusable answer templates. Unverified fields
-(name, education, experience, work authorization, notice period, availability)
-are explicit and must be confirmed before use — `profile.py` refuses to render
-an answer that depends on an unconfirmed fact rather than inventing one.
+`data/candidate_profile.toml` and `data/answer_bank.toml` hold the non-sensitive
+schema (portfolio, technologies, target roles, location and employment
+preferences) plus reusable answer templates. Verified personal facts (name,
+contact, education, employment history, projects) live in `data/personal.toml`,
+which is **git-ignored** — populate it from your resume and never commit it.
+`profile.py` refuses to render an answer that depends on an unconfirmed fact
+rather than inventing one; the `profile` command prints the remaining
+confirmation checklist.
+
+## Outreach pipeline
+
+`discover` → `pipeline` → `draft` → `dashboard` converts company discovery into
+a tracked, approval-gated outreach queue:
+
+- `pipeline` qualifies discovered companies into the outreach database
+  (`data/outreach.db`) with four tiers — `active_vacancy`,
+  `high_signal_speculative`, `research_candidate`, `unqualified`.
+- `outreach` shows metrics and the top shortlisted companies.
+- `draft <domain> --type founder|vacancy|internship|referral|followup` renders a
+  personalized email from verified facts + company evidence, with an evidence
+  map linking every claim to its source. Use `--save` to store it.
+- `dashboard` serves a mobile-friendly web UI (`http://127.0.0.1:8090`) with
+  bearer-token auth; bind to a private address only and always pass `--token`.
+
+The pipeline database records contacts, enrichment history, company evidence,
+drafts, outbound messages, Gmail threads, follow-ups, replies, interviews, and
+audit events. Status changes append audit events rather than overwriting
+history. **Nothing sends email or applies to jobs** — drafts and follow-ups
+require explicit approval, and the Gmail/Apollo adapters are dry-run only until
+credentials are authorized.
 
 ## Tracking
 

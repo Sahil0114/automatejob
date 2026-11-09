@@ -16,6 +16,9 @@ from .companies import CompanyRegistry
 from .company import CompanyStorage
 from .config import AppConfig
 from .discovery import CompanyDiscovery
+from .email_draft import DRAFT_TYPES, draft_email
+from .outreach import OutreachStorage
+from .pipeline import build_shortlist
 from .profile import AnswerBank, CandidateProfile, UnverifiedField
 from .storage import Storage
 
@@ -433,19 +436,102 @@ def cmd_ats(cfg: AppConfig, args) -> int:
 
 def cmd_profile(cfg: AppConfig, args) -> int:
     prof = CandidateProfile(args.path)
-    print("Candidate profile (verified facts):")
+    print("Candidate profile:")
+    print(f"  name:       {prof.name}")
+    print(f"  email:      {prof.email}")
     print(f"  portfolio:  {prof.portfolio or '(unset)'}")
+    print(f"  github:     {prof.github or '(unset)'}")
+    print(f"  linkedin:   {prof.linkedin or '(unset)'}")
+    print(f"  education:  {prof.education_summary[:80]}...")
+    print(f"  experience: {len(prof.experience)} roles (latest: "
+          f"{prof.experience[0]['title']} @ {prof.experience[0]['company']})" if prof.experience else "  experience: (none)")
     print(f"  tech:       {', '.join(prof.technologies[:8])}...")
-    print(f"  roles:      {', '.join(r['label'] for r in prof.target_roles)}")
     missing = prof.unverified_fields()
     print(f"\nUnverified fields needing confirmation ({len(missing)}):")
     for m in missing:
         print(f"  - {m}")
-    if args.bank:
-        bank = AnswerBank(args.bank)
-        print(f"\nAnswer bank questions ({len(bank.questions())}):")
-        for q in bank.questions():
-            print(f"  - {q}")
+    return 0
+
+
+def cmd_pipeline(cfg: AppConfig, args) -> int:
+    from .pipeline import build_shortlist
+    cstore = CompanyStorage(cfg.companies_db_path)
+    jobs = Storage(cfg.db_path)
+    out = OutreachStorage(cfg.outreach_db_path)
+    try:
+        n = build_shortlist(cstore, jobs, out, limit=args.limit)
+        m = out.metrics()
+        print(f"Qualified {n} companies into the outreach pipeline.")
+        print(f"  by qualification:")
+        for r in out.conn.execute(
+            "SELECT qualification, COUNT(*) c FROM outreach_companies GROUP BY qualification"):
+            print(f"    {r['qualification']:26s} {r['c']}")
+        print(f"  metrics: {m}")
+        return 0
+    finally:
+        out.close(); jobs.close(); cstore.close()
+
+
+def cmd_outreach(cfg: AppConfig, args) -> int:
+    out = OutreachStorage(cfg.outreach_db_path)
+    try:
+        m = out.metrics()
+        for k, v in m.items():
+            print(f"  {k:22s} {v}")
+        print("\nTop companies:")
+        for r in out.conn.execute(
+            "SELECT name, domain, qualification, score FROM outreach_companies "
+            "ORDER BY score DESC LIMIT 10"):
+            print(f"  {r['score']:5.1f} [{r['qualification']:24s}] {r['name']} ({r['domain']})")
+        return 0
+    finally:
+        out.close()
+
+
+def cmd_draft(cfg: AppConfig, args) -> int:
+    prof = CandidateProfile("data/candidate_profile.toml")
+    out = OutreachStorage(cfg.outreach_db_path)
+    try:
+        row = out.conn.execute(
+            "SELECT * FROM outreach_companies WHERE domain=? OR name=?",
+            (args.company, args.company)).fetchone()
+        if row is None:
+            print(f"No outreach company for {args.company!r}. Run `pipeline` first.")
+            return 1
+        evidence = out.list_evidence(row["company_id"])
+        contact = None
+        d = draft_email(prof, dict(row), contact, args.type,
+                        evidence=evidence, job_title=args.job_title)
+        print(f"Subject: {d['subject']}\n")
+        print(d["body"])
+        print("\n--- evidence map ---")
+        for k, v in d["evidence_map"].items():
+            print(f"  {k}: {v}")
+        if args.save:
+            did = out.create_draft(row["company_id"], args.type, d["subject"], d["body"],
+                                   d["evidence_map"])
+            print(f"\nSaved as draft #{did} (state=draft_ready).")
+        return 0
+    finally:
+        out.close()
+
+
+def cmd_dashboard(cfg: AppConfig, args) -> int:
+    from .dashboard import run_dashboard
+    out = OutreachStorage(cfg.outreach_db_path)
+    cstore = CompanyStorage(cfg.companies_db_path)
+    token = args.token or ""
+    server, _ = run_dashboard(out, companies_store=cstore, host=args.host,
+                              port=args.port, token=token)
+    url = f"http://{args.host}:{args.port}"
+    print(f"Dashboard running at {url}" + (f"?token={token}" if token else ""))
+    print("Press Ctrl+C to stop.")
+    try:
+        import time
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        server.shutdown()
     return 0
 
 
@@ -538,8 +624,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     pp = sub.add_parser("profile", help="show the verified candidate profile")
     pp.add_argument("--path", default="data/candidate_profile.toml")
-    pp.add_argument("--bank", default=None, help="path to answer_bank.toml")
     pp.set_defaults(func=cmd_profile)
+
+    pl2 = sub.add_parser("pipeline", help="qualify companies into the outreach pipeline")
+    pl2.add_argument("--limit", type=int, default=50)
+    pl2.set_defaults(func=cmd_pipeline)
+
+    po = sub.add_parser("outreach", help="show outreach pipeline overview")
+    po.set_defaults(func=cmd_outreach)
+
+    pdr = sub.add_parser("draft", help="generate a personalized email draft")
+    pdr.add_argument("company", help="company domain or name")
+    pdr.add_argument("--type", choices=DRAFT_TYPES, default="founder")
+    pdr.add_argument("--job-title", default=None)
+    pdr.add_argument("--save", action="store_true", help="save draft to the pipeline DB")
+    pdr.set_defaults(func=cmd_draft)
+
+    pda = sub.add_parser("dashboard", help="run the local web dashboard")
+    pda.add_argument("--host", default="127.0.0.1")
+    pda.add_argument("--port", type=int, default=8090)
+    pda.add_argument("--token", default="", help="bearer token (empty = no auth)")
+    pda.set_defaults(func=cmd_dashboard)
 
     return p
 

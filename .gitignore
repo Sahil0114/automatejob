@@ -7,6 +7,9 @@ data/*.db-shm
 *.db-wal
 *.db-shm
 
+# Personal facts (name/email/phone/resume-derived) — never committed.
+data/personal.toml
+
 # runtime reports (daily output, last-run state)
 reports/
 
