@@ -47,6 +47,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     eligibility        TEXT NOT NULL DEFAULT '',
     eligibility_reason TEXT NOT NULL DEFAULT '',
     seniority          TEXT NOT NULL DEFAULT '',
+    role_family        TEXT NOT NULL DEFAULT '',
+    location_preference TEXT NOT NULL DEFAULT '',
+    actionable         INTEGER NOT NULL DEFAULT 0,
     cross_board_key    TEXT NOT NULL DEFAULT '',
     content_hash       TEXT NOT NULL DEFAULT '',
     status             TEXT NOT NULL DEFAULT 'open',
@@ -69,6 +72,7 @@ _NEW_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_jobs_eligibility ON jobs(eligibility);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_cross_board ON jobs(cross_board_key);
+CREATE INDEX IF NOT EXISTS idx_jobs_actionable ON jobs(actionable);
 """
 
 # Columns added since the original MVP schema (migrated with ALTER TABLE).
@@ -77,6 +81,9 @@ _MIGRATIONS = [
     ("eligibility", "TEXT NOT NULL DEFAULT ''"),
     ("eligibility_reason", "TEXT NOT NULL DEFAULT ''"),
     ("seniority", "TEXT NOT NULL DEFAULT ''"),
+    ("role_family", "TEXT NOT NULL DEFAULT ''"),
+    ("location_preference", "TEXT NOT NULL DEFAULT ''"),
+    ("actionable", "INTEGER NOT NULL DEFAULT 0"),
     ("cross_board_key", "TEXT NOT NULL DEFAULT ''"),
     ("content_hash", "TEXT NOT NULL DEFAULT ''"),
     ("status", "TEXT NOT NULL DEFAULT 'open'"),
@@ -90,6 +97,7 @@ _COLUMNS = (
     "url_normalized", "apply_url", "workplace_type", "employment_type",
     "posted_at", "description", "secondary_locations", "score",
     "score_reasons", "eligibility", "eligibility_reason", "seniority",
+    "role_family", "location_preference", "actionable",
     "cross_board_key", "content_hash", "status", "absent_scans", "changed_at",
     "is_new", "first_seen_at", "last_seen_at",
 )
@@ -158,7 +166,8 @@ class Storage:
                     "apply_url = ?, workplace_type = ?, employment_type = ?, "
                     "posted_at = ?, description = ?, secondary_locations = ?, "
                     "score = ?, score_reasons = ?, eligibility = ?, "
-                    "eligibility_reason = ?, seniority = ?, cross_board_key = ?, "
+                    "eligibility_reason = ?, seniority = ?, role_family = ?, "
+                    "location_preference = ?, actionable = ?, cross_board_key = ?, "
                     "content_hash = ?, changed_at = ?, absent_scans = 0, "
                     "status = 'open', is_new = 0, last_seen_at = ? "
                     "WHERE dedup_key = ?",
@@ -168,7 +177,8 @@ class Storage:
                      job.posted_at, job.description,
                      json.dumps(job.secondary_locations), job.score,
                      json.dumps(job.score_reasons), job.eligibility,
-                     job.eligibility_reason, job.seniority, job.cross_board_key,
+                     job.eligibility_reason, job.seniority, job.role_family,
+                     job.location_preference, job.actionable, job.cross_board_key,
                      job.content_hash, changed_at, now, job.dedup_key),
                 )
                 if content_changed:
@@ -229,19 +239,23 @@ class Storage:
         limit: Optional[int] = None,
         source_type: Optional[str] = None,
         eligibility: Optional[str] = None,
+        location_preference: Optional[str] = None,
         status: Optional[str] = "open",
-        only_qualified: bool = False,
+        only_actionable: bool = False,
     ) -> List[dict]:
         """Return stored jobs, highest score first."""
         where = []
         params: list = []
         if only_new:
             where.append("is_new = 1")
-        if only_qualified:
-            where.append("eligibility = 'confirmed'")
+        if only_actionable:
+            where.append("actionable = 1")
         elif eligibility is not None:
             where.append("eligibility = ?")
             params.append(eligibility)
+        if location_preference is not None:
+            where.append("location_preference = ?")
+            params.append(location_preference)
         if min_score is not None:
             where.append("score >= ?")
             params.append(min_score)
@@ -287,6 +301,14 @@ class Storage:
             "SELECT COUNT(*) AS c FROM jobs WHERE status = 'open'").fetchone()["c"])
         out["closed"] = int(self.conn.execute(
             "SELECT COUNT(*) AS c FROM jobs WHERE status = 'closed'").fetchone()["c"])
+        out["actionable"] = int(self.conn.execute(
+            "SELECT COUNT(*) AS c FROM jobs WHERE actionable = 1 AND status = 'open'"
+        ).fetchone()["c"])
+        pref = self.conn.execute(
+            "SELECT location_preference AS k, COUNT(*) AS c FROM jobs "
+            "WHERE status = 'open' GROUP BY location_preference"
+        ).fetchall()
+        out["location_preference"] = {r["k"] or "unset": r["c"] for r in pref}
         return out
 
     def find_cross_board_duplicates(self) -> List[dict]:
@@ -306,9 +328,11 @@ class Storage:
     def update_score(self, job_id: int, job: Job) -> None:
         self.conn.execute(
             "UPDATE jobs SET score = ?, score_reasons = ?, eligibility = ?, "
-            "eligibility_reason = ?, seniority = ?, content_hash = ? WHERE id = ?",
+            "eligibility_reason = ?, seniority = ?, role_family = ?, "
+            "location_preference = ?, actionable = ?, content_hash = ? WHERE id = ?",
             (job.score, json.dumps(job.score_reasons), job.eligibility,
-             job.eligibility_reason, job.seniority, job.content_hash, job_id),
+             job.eligibility_reason, job.seniority, job.role_family,
+             job.location_preference, job.actionable, job.content_hash, job_id),
         )
 
     def export_rows(self, rows: List[dict]) -> List[dict]:
@@ -322,7 +346,10 @@ class Storage:
                 "employment_type": r["employment_type"],
                 "eligibility": r["eligibility"],
                 "eligibility_reason": r["eligibility_reason"],
+                "location_preference": r["location_preference"],
+                "role_family": r["role_family"],
                 "seniority": r["seniority"],
+                "actionable": r["actionable"],
                 "score": r["score"],
                 "status": r["status"],
                 "url": r["url"],

@@ -149,11 +149,9 @@ points = 30
 # ---- hard eligibility filter (applied BEFORE scoring) ---------------------
 
 [eligibility]
-# On-site/hybrid cities the user will work in (Mumbai metro, incl. relocation).
+# On-site/hybrid cities the user will work in (Mumbai metro = default shortlist).
 cities = ["mumbai", "thane", "navi mumbai", "new bombay"]
-# Accept on-site/hybrid roles anywhere in India.
-india_wide = true
-# Keep unresolved locations for review instead of excluding outright.
+# Other Indian cities go to a separate relocation queue (not the shortlist).
 relocation = true
 
 # ---- change/closure tracking ----------------------------------------------
@@ -167,6 +165,11 @@ close_after_scans = 2
 
 [companies]
 path = "data/companies.toml"
+
+# ---- daily report output ---------------------------------------------------
+
+[report]
+dir = "reports"
 
 # ---- scoring weights ------------------------------------------------------
 

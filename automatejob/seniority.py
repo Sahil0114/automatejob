@@ -78,8 +78,12 @@ _SENIOR_EXPERIENCE = re.compile(
 )
 
 # Level-coded titles like "Software Engineer 2" / "Engineer III".
-_LEVEL_CODE = re.compile(r"\b(?:engineer|sre|developer|scientist)\s+(?:i{1,3}|\d)\b",
+_LEVEL_CODE = re.compile(r"\b(?:engineer|sre|developer|scientist)\s+(i{1,3}|\d)\b",
                          re.IGNORECASE)
+
+# BigTech-style level codes "L3"/"E4" (Google L3 = entry, but ambiguous across
+# firms; handled conservatively).
+_LEVEL_L = re.compile(r"\b[le]([2-9])\b", re.IGNORECASE)
 
 
 def _has(terms, text: str) -> bool:
@@ -106,7 +110,7 @@ def classify_seniority(job: Job) -> str:
     has_junior = _has(_JUNIOR_TERMS, text)
     has_senior = _has(_SENIOR_TERMS, text)
     has_lead = _has(_LEAD_TERMS, text)
-    has_intermediate = _has(_INTERMEDIATE_TERMS, title) or _LEVEL_CODE.search(title)
+    has_intermediate = _has(_INTERMEDIATE_TERMS, title)
 
     # Experience bands in the description (title experience is rare, but check both).
     junior_exp = bool(_JUNIOR_EXPERIENCE.search(full))
@@ -148,7 +152,7 @@ def classify_seniority(job: Job) -> str:
     if intermediate_exp and senior_exp:
         return REVIEW
 
-    # Level-coded "Engineer 3" that isn't caught above -> intermediate.
+    # Level-coded "Engineer 3" / "Engineer II" that isn't caught above.
     m = _LEVEL_CODE.search(title)
     if m:
         code = m.group(1)
@@ -156,7 +160,17 @@ def classify_seniority(job: Job) -> str:
             return JUNIOR
         if code in ("ii", "2"):
             return INTERMEDIATE
-        return SENIOR
+        return SENIOR  # "3"/"III" -> mid/senior, clearly not junior
+
+    # BigTech level codes "L3"/"E4". L3 (entry at some firms) is ambiguous -> review.
+    m = _LEVEL_L.search(title)
+    if m:
+        n = int(m.group(1))
+        if n == 2:
+            return INTERMEDIATE
+        if n == 3:
+            return REVIEW
+        return SENIOR  # L4+ / E4+
 
     return UNKNOWN
 
@@ -164,3 +178,17 @@ def classify_seniority(job: Job) -> str:
 def seniority_is_junior_target(level: str) -> bool:
     """True for levels the search actively prioritises."""
     return level in (INTERNSHIP, JUNIOR)
+
+
+def seniority_gate(level: str) -> str:
+    """Map a seniority level to an actionable gate.
+
+    * "actionable" — intern/new-grad/fresher/trainee/junior/0-2 years.
+    * "review"     — uncertain (no signal, or borderline).
+    * "gated"      — intermediate/senior/staff/lead/manager.
+    """
+    if level in (INTERNSHIP, JUNIOR):
+        return "actionable"
+    if level in (INTERMEDIATE, SENIOR, LEAD):
+        return "gated"
+    return "review"  # REVIEW and UNKNOWN

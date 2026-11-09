@@ -46,6 +46,7 @@ class ScoringConfig:
     remote_restricted_penalty: int = -15
     remote_india_bonus: int = 4
     needs_verification_points: int = 5  # ambiguous-remote roles, kept below confirmed
+    relocation_points: int = 10         # other-India cities (relocation queue)
     seniority_max: int = 15
     internship_max: int = 10
     junior_bonus: int = 15
@@ -56,10 +57,9 @@ class ScoringConfig:
 
 @dataclass
 class EligibilityConfig:
-    """Location & relocation preferences (hard eligibility filter)."""
+    """Location & relocation preferences (kept separate from employment eligibility)."""
     cities: List[str] = field(default_factory=lambda: ["mumbai", "thane", "navi mumbai"])
-    india_wide: bool = True       # accept on-site/hybrid roles anywhere in India
-    relocation: bool = True       # keep unresolved locations for review instead of excluding
+    relocation: bool = True       # accept other India cities into a relocation queue
 
 
 @dataclass
@@ -71,6 +71,7 @@ class AppConfig:
     eligibility: EligibilityConfig
     db_path: str = "data/jobs.db"
     companies_path: str = "data/companies.toml"
+    reports_dir: str = "reports"
     min_score: float = 40.0
     list_limit: int = 20
     close_after_scans: int = 2
@@ -118,7 +119,6 @@ class AppConfig:
         elig_raw = raw.get("eligibility", {})
         eligibility = EligibilityConfig(
             cities=[str(c) for c in elig_raw.get("cities", ["mumbai", "thane", "navi mumbai"])],
-            india_wide=bool(elig_raw.get("india_wide", True)),
             relocation=bool(elig_raw.get("relocation", True)),
         )
 
@@ -130,6 +130,7 @@ class AppConfig:
             eligibility=eligibility,
             db_path=database.get("path", "data/jobs.db"),
             companies_path=raw.get("companies", {}).get("path", "data/companies.toml"),
+            reports_dir=raw.get("report", {}).get("dir", "reports"),
             min_score=float(collect.get("min_score", 40.0)),
             list_limit=int(collect.get("list_limit", 20)),
             close_after_scans=int(tracking.get("close_after_scans", 2)),

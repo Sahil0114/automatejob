@@ -1,4 +1,4 @@
-"""Command-line interface: collect, list, rescore, export, and manage jobs."""
+"""Command-line interface: collect, list, rescore, export, daily report, and manage jobs."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .collector import Collector
@@ -48,15 +49,30 @@ def _format_reasons(reasons) -> str:
     return "\n".join(lines)
 
 
+def _fit_reasons(row: dict) -> str:
+    parts = []
+    if row.get("role_family"):
+        parts.append(f"role={row['role_family']}")
+    if row.get("seniority"):
+        parts.append(f"seniority={row['seniority']}")
+    pref = row.get("location_preference")
+    if pref:
+        parts.append(f"loc={pref}")
+    if row.get("eligibility_reason"):
+        parts.append(row["eligibility_reason"])
+    return "; ".join(parts)
+
+
 def _print_job(job: dict, show_reasons: bool = True) -> None:
     score = job["score"]
     new_tag = "[NEW] " if job["is_new"] else ""
     status = f"[{job.get('status', 'open')}] " if job.get("status") != "open" else ""
-    elig = job.get("eligibility", "") or ""
-    print(f"{score:5.1f} {new_tag}{status}{job['title']} @ {job['company']}  ({elig})")
+    pref = job.get("location_preference") or ""
+    print(f"{score:5.1f} {new_tag}{status}{job['title']} @ {job['company']}  ({pref})")
     loc = job["location"] or job["workplace_type"] or "(location unknown)"
-    seniority = f"  seniority={job.get('seniority', '')}" if job.get("seniority") else ""
-    print(f"        {loc}  [{job['source_type']}:{job['source_token']}]{seniority}")
+    extra = f"  role={job.get('role_family', '')}" if job.get("role_family") else ""
+    extra += f"  seniority={job.get('seniority', '')}" if job.get("seniority") else ""
+    print(f"        {loc}  [{job['source_type']}:{job['source_token']}]{extra}")
     print(f"        {job['url']}")
     if show_reasons and job.get("score_reasons"):
         try:
@@ -71,11 +87,34 @@ def _open_storage(cfg: AppConfig) -> Storage:
     return Storage(cfg.db_path)
 
 
+def _write_last_run(cfg: AppConfig, new_count: int, errors: list) -> Path:
+    path = Path(cfg.reports_dir) / "last_run.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "ran_at": datetime.now(timezone.utc).isoformat(),
+        "new_jobs": new_count,
+        "errors": errors,
+    }
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return path
+
+
+def _read_last_run(cfg: AppConfig) -> dict:
+    path = Path(cfg.reports_dir) / "last_run.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return {}
+
+
 def cmd_collect(cfg: AppConfig, args) -> int:
     storage = _open_storage(cfg)
     try:
         collector = Collector(cfg, storage, registry=_load_registry(cfg))
         new_jobs, errors = collector.collect()
+        _write_last_run(cfg, len(new_jobs), errors)
 
         print(f"Collected from {len(cfg.sources)} source(s): "
               f"{len(new_jobs)} newly discovered.\n")
@@ -87,12 +126,14 @@ def cmd_collect(cfg: AppConfig, args) -> int:
             print()
 
         stats = storage.stats()
-        elig = stats.get("eligibility", {})
-        print("Eligibility breakdown (all jobs):")
-        print(f"  confirmed:          {elig.get('confirmed', 0)}")
-        print(f"  needs_verification: {elig.get('needs_verification', 0)}")
-        print(f"  excluded:           {elig.get('excluded', 0)}")
-        print(f"  total stored:       {stats['total']}")
+        print("Breakdown (open jobs):")
+        print(f"  actionable:          {stats.get('actionable', 0)}")
+        print(f"  needs_verification:  {stats.get('eligibility', {}).get('needs_verification', 0)}")
+        print(f"  excluded:            {stats.get('eligibility', {}).get('excluded', 0)}")
+        pref = stats.get("location_preference", {})
+        print(f"  by preference:       mumbai={pref.get('mumbai', 0)} "
+              f"relocation={pref.get('relocation', 0)} remote={pref.get('remote', 0)}")
+        print(f"  total stored:        {stats['total']}")
         print()
 
         shown = new_jobs
@@ -124,7 +165,8 @@ def cmd_list(cfg: AppConfig, args) -> int:
             limit=args.limit if args.limit is not None else cfg.list_limit,
             source_type=args.source,
             eligibility=args.eligibility,
-            only_qualified=args.qualified,
+            location_preference=args.preference,
+            only_actionable=args.actionable,
             status=None if args.all else "open",
         )
         if not rows:
@@ -145,8 +187,7 @@ def cmd_rescore(cfg: AppConfig, args) -> int:
     try:
         collector = Collector(cfg, storage, registry=_load_registry(cfg))
         n = collector.rescore()
-        print(f"Re-scored {n} stored job(s) in place against the current config "
-              "(no refetch).")
+        print(f"Re-classified + re-scored {n} stored job(s) in place (no refetch).")
         return 0
     finally:
         storage.close()
@@ -155,15 +196,15 @@ def cmd_rescore(cfg: AppConfig, args) -> int:
 def cmd_export(cfg: AppConfig, args) -> int:
     storage = _open_storage(cfg)
     try:
-        rows = storage.list_jobs(
-            only_new=False,
-            min_score=None,
-            limit=None,
-            source_type=None,
-            eligibility=None if args.all else "confirmed",
-            only_qualified=False,
-            status=None if args.all else "open",
-        )
+        if args.all:
+            rows = storage.list_jobs(only_new=False, min_score=None, limit=None,
+                                     status=None)
+        elif args.actionable:
+            rows = storage.list_jobs(only_new=False, min_score=None, limit=None,
+                                     only_actionable=True, status="open")
+        else:
+            rows = storage.list_jobs(only_new=False, min_score=None, limit=None,
+                                     eligibility="confirmed", status="open")
         data = storage.export_rows(rows)
         fmt = args.format.lower()
         if fmt == "json":
@@ -195,11 +236,88 @@ def cmd_stats(cfg: AppConfig, args) -> int:
         print(f"total jobs:            {s['total']}")
         print(f"  open:                {s['open']}")
         print(f"  closed:              {s['closed']}")
-        print("by eligibility:")
+        print(f"  actionable (open):   {s.get('actionable', 0)}")
+        print("by eligibility (open):")
         for k, v in sorted(s.get("eligibility", {}).items()):
+            print(f"  {k:22s} {v}")
+        print("by location preference (open):")
+        for k, v in sorted(s.get("location_preference", {}).items()):
             print(f"  {k:22s} {v}")
         dups = storage.find_cross_board_duplicates()
         print(f"cross-board duplicate groups: {len(dups)}")
+        return 0
+    finally:
+        storage.close()
+
+
+def cmd_daily(cfg: AppConfig, args) -> int:
+    storage = _open_storage(cfg)
+    try:
+        out = []
+        out.append(f"automatejob daily report — {datetime.now(timezone.utc).isoformat()}")
+        out.append("")
+
+        # Newly discovered actionable jobs.
+        actionable = storage.list_jobs(only_new=not args.all,
+                                       only_actionable=True, limit=args.limit,
+                                       status="open")
+        out.append(f"Newly discovered actionable jobs ({len(actionable)}):")
+        if actionable:
+            for r in actionable:
+                out.append(f"  {r['title']} @ {r['company']} — {r['location'] or r['workplace_type']}")
+                out.append(f"    {r['url']}")
+                out.append(f"    fit: {_fit_reasons(r)}")
+        else:
+            out.append("  (none)")
+
+        # Changed postings.
+        changed = storage.conn.execute(
+            "SELECT title, company, location, url, changed_at FROM jobs "
+            "WHERE changed_at != '' ORDER BY changed_at DESC LIMIT ?", (args.limit or 20,)
+        ).fetchall()
+        out.append("")
+        out.append(f"Changed postings ({len(changed)}):")
+        for r in changed:
+            out.append(f"  {r['title']} @ {r['company']} — {r['location']}  {r['url']}")
+
+        # Closed roles.
+        closed = storage.conn.execute(
+            "SELECT title, company, location, url FROM jobs WHERE status = 'closed' "
+            "ORDER BY last_seen_at DESC LIMIT ?", (args.limit or 20,)
+        ).fetchall()
+        out.append("")
+        out.append(f"Closed roles ({len(closed)}):")
+        for r in closed:
+            out.append(f"  {r['title']} @ {r['company']} — {r['location']}")
+
+        # Needs-verification queue.
+        nv = storage.list_jobs(only_new=False, eligibility="needs_verification",
+                               status="open", limit=args.limit or 20)
+        nv_total = storage.conn.execute(
+            "SELECT COUNT(*) c FROM jobs WHERE eligibility='needs_verification' AND status='open'"
+        ).fetchone()["c"]
+        out.append("")
+        out.append(f"Needs-verification queue ({nv_total} total, showing {len(nv)}):")
+        for r in nv:
+            out.append(f"  {r['title']} @ {r['company']} — {r['location']}  {r['url']}")
+
+        # Failed sources (from last collect run).
+        last = _read_last_run(cfg)
+        errors = last.get("errors", [])
+        out.append("")
+        if errors:
+            out.append(f"Failed sources ({len(errors)}):")
+            for e in errors:
+                out.append(f"  - {e['source']}: {e['error']}")
+        else:
+            out.append(f"Failed sources: 0 (last run {last.get('ran_at', 'unknown')})")
+
+        text = "\n".join(out) + "\n"
+        if args.output:
+            Path(args.output).write_text(text, encoding="utf-8")
+            print(f"Wrote daily report to {args.output}")
+        else:
+            sys.stdout.write(text)
         return 0
     finally:
         storage.close()
@@ -238,36 +356,44 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     pc = sub.add_parser("collect", help="fetch from all sources and list newly discovered jobs")
-    pc.add_argument("--min-score", type=float, default=None,
-                    help="only show new jobs scoring at least this")
-    pc.add_argument("--limit", type=int, default=None,
-                    help="cap the number of new jobs shown")
+    pc.add_argument("--min-score", type=float, default=None)
+    pc.add_argument("--limit", type=int, default=None)
     pc.set_defaults(func=cmd_collect)
 
     pl = sub.add_parser("list", help="list stored jobs")
     pl.add_argument("--all", action="store_true", help="show all jobs, not just new ones")
-    pl.add_argument("--qualified", action="store_true",
-                    help="only confirmed-eligible jobs")
+    pl.add_argument("--actionable", action="store_true",
+                    help="only roles that pass ALL gates (open + role + seniority + location)")
     pl.add_argument("--eligibility", type=str, default=None, choices=[
         "confirmed", "excluded", "needs_verification"],
-        help="filter by eligibility status")
+        help="filter by employment eligibility")
+    pl.add_argument("--preference", type=str, default=None, choices=[
+        "mumbai", "relocation", "remote"],
+        help="filter by location preference")
     pl.add_argument("--min-score", type=float, default=None)
     pl.add_argument("--limit", type=int, default=None)
     pl.add_argument("--source", type=str, default=None,
                     help="filter by source type (greenhouse/lever/ashby)")
-    pl.add_argument("--mark-seen", action="store_true", help="clear the 'new' flag after listing")
+    pl.add_argument("--mark-seen", action="store_true")
     pl.add_argument("--no-reasons", action="store_true", help="hide scoring reasons")
     pl.set_defaults(func=cmd_list)
 
-    pr = sub.add_parser("rescore", help="re-score stored jobs in place (no refetch)")
+    pr = sub.add_parser("rescore", help="re-classify + re-score stored jobs in place (no refetch)")
     pr.set_defaults(func=cmd_rescore)
 
     pe = sub.add_parser("export", help="export stored jobs to CSV/JSON")
     pe.add_argument("--format", type=str, default="csv", choices=["csv", "json"])
-    pe.add_argument("--all", action="store_true",
-                    help="export every job; default is confirmed-eligible only")
-    pe.add_argument("-o", "--output", type=str, default=None, help="write to a file")
+    pe.add_argument("--all", action="store_true", help="export every job")
+    pe.add_argument("--actionable", action="store_true",
+                    help="export only actionable jobs (default: confirmed-eligible)")
+    pe.add_argument("-o", "--output", type=str, default=None)
     pe.set_defaults(func=cmd_export)
+
+    pd = sub.add_parser("daily", help="print a concise daily report")
+    pd.add_argument("--all", action="store_true", help="show all actionable jobs, not just new")
+    pd.add_argument("--limit", type=int, default=20)
+    pd.add_argument("-o", "--output", type=str, default=None)
+    pd.set_defaults(func=cmd_daily)
 
     ps = sub.add_parser("stats", help="show aggregate database statistics")
     ps.set_defaults(func=cmd_stats)
@@ -296,7 +422,7 @@ def main(argv=None) -> int:
         print(f"error: failed to load config {config_path}: {exc}", file=sys.stderr)
         return 2
 
-    if args.command != "companies" and not cfg.sources:
+    if args.command not in ("companies", "sources") and not cfg.sources:
         print("error: no sources configured in config file", file=sys.stderr)
         return 2
 

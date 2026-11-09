@@ -1,15 +1,10 @@
 """Job fit scoring with explainable reasons.
 
-Scores a Job 0..100 against the configured target profile across four
-independent factors. Every factor appends a human-readable reason.
-
-The score is computed AFTER the hard eligibility filter (see eligibility.py):
-excluded jobs are never scored (the collector assigns them 0), and
-needs_verification jobs are scored but kept out of the confirmed list.
-
-Calibration targets: a strong match (right role + Mumbai/India-remote +
-junior) scores ~65-80; an intermediate/senior or wrong-location role scores
-lower; an irrelevant role scores ~0-15.
+The score ranks jobs *within* their qualification bucket; it does NOT decide
+actionability. Actionability is a hard gate computed by qualification.py
+(open + target role family + junior seniority + acceptable location). The
+score's role factor is title-driven: a non-engineering title never earns role
+points just because its description mentions engineering keywords.
 """
 
 from __future__ import annotations
@@ -22,16 +17,24 @@ from .eligibility import (
     CONFIRMED,
     EXCLUDED,
     NEEDS_VERIFICATION,
-    analyze_location,
+    PREF_MUMBAI,
+    PREF_RELOCATION,
+    PREF_REMOTE,
     classify_eligibility,
 )
 from .models import Job
+from .role_family import (
+    NON_ENGINEERING,
+    OTHER_ENGINEERING,
+    REVIEW,
+    TARGET_FAMILIES,
+    classify_role_family,
+)
 from .seniority import (
     INTERMEDIATE,
     INTERNSHIP,
     JUNIOR,
     LEAD,
-    REVIEW,
     SENIOR,
     UNKNOWN,
     classify_seniority,
@@ -57,22 +60,23 @@ class Scorer:
         self.w: ScoringConfig = config.scoring
         self.config = config
 
-    def ensure_eligibility(self, job: Job) -> str:
-        """Fill in job.eligibility / reason / seniority if not already set."""
+    def _ensure_classified(self, job: Job) -> None:
+        """Fill missing classification fields (idempotent; collector pre-sets them)."""
+        if not job.role_family:
+            job.role_family = classify_role_family(job)
+        if not job.seniority:
+            job.seniority = classify_seniority(job)
         if not job.eligibility:
             res = classify_eligibility(job, self.config)
             job.eligibility = res.status
             job.eligibility_reason = res.reason
-        if not job.seniority:
-            job.seniority = classify_seniority(job)
-        return job.eligibility
+            job.location_preference = res.preference
 
     def score(self, job: Job) -> Tuple[float, List[dict]]:
         """Return (score, reasons). Mutates job.score / job.score_reasons too."""
-        status = self.ensure_eligibility(job)
+        self._ensure_classified(job)
 
-        # Hard filter: excluded jobs never get scored into the ranking.
-        if status == EXCLUDED:
+        if job.eligibility == EXCLUDED:
             job.score = 0.0
             job.score_reasons = [{
                 "factor": "eligibility", "points": 0.0,
@@ -81,16 +85,13 @@ class Scorer:
             return job.score, job.score_reasons
 
         role_points, role_reasons = self._score_role(job)
-        loc_points, loc_reasons = self._score_location(job, status)
+        loc_points, loc_reasons = self._score_location(job)
         sen_points, sen_reasons = self._score_seniority(job)
         int_points, int_reasons = self._score_internship(job)
 
         reasons = role_reasons + loc_reasons + sen_reasons + int_reasons
         total = role_points + loc_points + sen_points + int_points
 
-        # A role with no target-role match AND no internship signal is not a
-        # target role at all: cap it so pure location/seniority points can't
-        # push an irrelevant role (e.g. a recruiter in Mumbai) high.
         if role_points == 0.0 and int_points == 0.0 and total > self.w.irrelevant_cap:
             total = float(self.w.irrelevant_cap)
             reasons.append({
@@ -107,6 +108,15 @@ class Scorer:
     # -- factors -----------------------------------------------------------
 
     def _score_role(self, job: Job) -> Tuple[float, List[dict]]:
+        family = job.role_family
+        if family == NON_ENGINEERING:
+            return 0.0, [{"factor": "role", "points": 0.0,
+                          "detail": f"non-engineering title (family={family})"}]
+        if family not in TARGET_FAMILIES:
+            label = "other engineering" if family == OTHER_ENGINEERING else ("ambiguous" if family == REVIEW else family)
+            return 0.0, [{"factor": "role", "points": 0.0,
+                          "detail": f"{label} title (not a target engineering family)"}]
+
         title = (job.title or "").lower()
         description = (job.description or "").lower()
 
@@ -137,42 +147,31 @@ class Scorer:
             return points, [{"factor": "role", "points": points, "detail": detail}]
         return 0.0, [{"factor": "role", "points": 0.0, "detail": "no target-role keywords matched"}]
 
-    def _score_location(self, job: Job, status: str) -> Tuple[float, List[dict]]:
-        a = analyze_location(job, self.config)
+    def _score_location(self, job: Job) -> Tuple[float, List[dict]]:
+        status = job.eligibility
+        pref = job.location_preference
 
         if status == CONFIRMED:
-            if a.preferred_city:
+            if pref == PREF_MUMBAI:
                 pts = self._loc_points("mumbai", float(self.w.location_max))
                 return pts, [{"factor": "location", "points": pts,
-                              "detail": f"preferred city '{a.preferred_city}' (eligible)"}]
-            if a.has_india:
-                pts = self._loc_points("india", 30.0)
-                detail = (f"India location '{a.india_city}' (India-wide eligible)" if a.india_city
-                          else "India location (eligible)")
-                return pts, [{"factor": "location", "points": pts, "detail": detail}]
-            if a.is_remote:
+                              "detail": "Mumbai metro (preferred)"}]
+            if pref == PREF_REMOTE:
                 pts = float(self.w.remote_open_points)
-                reasons = [{"factor": "location", "points": pts,
-                            "detail": "worldwide/India remote (eligible)"}]
-                if a.has_india:
-                    bonus = float(self.w.remote_india_bonus)
-                    pts += bonus
-                    reasons.append({"factor": "location", "points": bonus,
-                                    "detail": "remote role open to India"})
-                return pts, reasons
-            # confirmed but no location subtype (shouldn't happen)
+                return pts, [{"factor": "location", "points": pts,
+                              "detail": "India-eligible / worldwide remote"}]
+            if pref == PREF_RELOCATION:
+                pts = float(self.w.relocation_points)
+                return pts, [{"factor": "location", "points": pts,
+                              "detail": "other India city (relocation queue)"}]
             return 0.0, [{"factor": "location", "points": 0.0,
                           "detail": "eligible but no location detail"}]
 
         if status == NEEDS_VERIFICATION:
-            if a.is_remote:
-                pts = float(self.w.needs_verification_points)
-                return pts, [{"factor": "location", "points": pts,
-                              "detail": f"remote, unclear eligibility ({a.ambiguous_region or 'unspecified'})"}]
-            return 0.0, [{"factor": "location", "points": 0.0,
+            pts = float(self.w.needs_verification_points)
+            return pts, [{"factor": "location", "points": pts,
                           "detail": f"needs verification: {job.eligibility_reason}"}]
 
-        # EXCLUDED
         return 0.0, [{"factor": "location", "points": 0.0,
                       "detail": f"excluded: {job.eligibility_reason}"}]
 
@@ -191,7 +190,7 @@ class Scorer:
                         "detail": f"{level} role (junior target)"}]
         if level == INTERMEDIATE:
             return 0.0, [{"factor": "seniority", "points": 0.0,
-                          "detail": "intermediate level (above junior target, kept for review)"}]
+                          "detail": "intermediate level (above junior target)"}]
         if level in (SENIOR, LEAD):
             p = float(self.w.senior_penalty)
             return p, [{"factor": "seniority", "points": p,
@@ -199,9 +198,8 @@ class Scorer:
         if level == REVIEW:
             return 0.0, [{"factor": "seniority", "points": 0.0,
                           "detail": "borderline seniority — review"}]
-        p = float(self.w.neutral_bonus)
-        return p, [{"factor": "seniority", "points": p,
-                    "detail": "no seniority marker (junior-eligible)"}]
+        return 0.0, [{"factor": "seniority", "points": 0.0,
+                      "detail": "no seniority signal — uncertain (review)"}]
 
     def _score_internship(self, job: Job) -> Tuple[float, List[dict]]:
         if job.seniority == INTERNSHIP:

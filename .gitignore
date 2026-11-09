@@ -7,6 +7,9 @@ data/*.db-shm
 *.db-wal
 *.db-shm
 
+# runtime reports (daily output, last-run state)
+reports/
+
 # python
 __pycache__/
 *.py[cod]

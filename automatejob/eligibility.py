@@ -96,6 +96,37 @@ _INDIA_CITIES = [
     "jaipur", "kochi", "cochin", "chandigarh", "indore", "india",
 ]
 
+# Foreign cities that exclude India when named on-site/hybrid (NOT country
+# names, which are already in _RESTRICTED_WORDS). Single-word entries are
+# word-boundary matched so "dublin" catches "Dublin, Ireland" without hitting
+# unrelated words. Indian cities are deliberately absent.
+_FOREIGN_CITY_PHRASES = [
+    "san francisco", "los angeles", "palo alto", "mountain view", "salt lake city",
+    "san jose", "san diego", "santa clara", "santa monica", "menlo park",
+    "redwood city", "cupertino", "sunnyvale", "las vegas", "new orleans",
+    "san antonio", "fort worth", "st louis", "ho chi minh", "tel aviv",
+    "abu dhabi", "kuala lumpur", "sao paulo", "buenos aires", "rio de janeiro",
+    "cape town", "johannesburg", "new haven", "the hague", "frankfurt am main",
+]
+_FOREIGN_CITY_WORDS = [
+    "london", "dublin", "berlin", "munich", "hamburg", "frankfurt", "amsterdam",
+    "paris", "madrid", "barcelona", "valencia", "lisbon", "porto", "milan",
+    "rome", "turin", "warsaw", "krakow", "prague", "vienna", "brussels",
+    "antwerp", "stockholm", "copenhagen", "oslo", "helsinki", "zurich", "geneva",
+    "basel", "edinburgh", "manchester", "glasgow", "birmingham", "bristol",
+    "leeds", "aarhus", "belgrade", "bucharest", "sofia", "budapest", "athens",
+    "thessaloniki", "tallinn", "vilnius", "riga", "zagreb", "ljubljana",
+    "bratislava", "toronto", "vancouver", "montreal", "ottawa", "calgary",
+    "edmonton", "waterloo", "seattle", "austin", "boston", "denver", "chicago",
+    "bellevue", "portland", "atlanta", "dallas", "houston", "phoenix",
+    "honolulu", "miami", "minneapolis", "raleigh", "durham", "detroit",
+    "pittsburgh", "philadelphia", "charlotte", "nashville", "tokyo", "seoul",
+    "sydney", "melbourne", "brisbane", "perth", "adelaide", "taipei", "shanghai",
+    "beijing", "shenzhen", "guangzhou", "jakarta", "manila", "bangkok",
+    "auckland", "wellington", "dubai", "doha", "riyadh", "istanbul", "ankara",
+    "cambridge", "oxford",
+]
+
 
 def _kw(kw: str, text: str) -> bool:
     """Substring match for short tokens, word-boundary for very short ones."""
@@ -200,10 +231,10 @@ def _foreign_country(text: str, raw: str) -> Optional[str]:
                    "south korea", "new zealand", "hong kong", "saudi arabia",
                    "czech republic", "new york", "new jersey", "north carolina",
                    "south carolina", "new hampshire", "west virginia",
-                   "rhode island", "new mexico"]:
+                   "rhode island", "new mexico"] + _FOREIGN_CITY_PHRASES:
         if phrase in text:
             return phrase.title()
-    for word in _RESTRICTED_WORDS:
+    for word in _RESTRICTED_WORDS + _FOREIGN_CITY_WORDS:
         if _short_kw(word, text):
             return word.title()
     if raw:
@@ -215,13 +246,26 @@ def _foreign_country(text: str, raw: str) -> Optional[str]:
 
 @dataclass
 class EligibilityResult:
-    status: str
+    status: str            # confirmed | excluded | needs_verification
     reason: str
     analysis: LocationAnalysis
+    preference: str = ""   # mumbai | relocation | remote ('' when excluded/needs_verification)
+
+
+PREF_MUMBAI = "mumbai"
+PREF_RELOCATION = "relocation"
+PREF_REMOTE = "remote"
 
 
 def classify_eligibility(job: Job, config: AppConfig, registry=None) -> EligibilityResult:
-    """Hard-filter a job into confirmed / excluded / needs_verification.
+    """Split a job into employment-eligibility + personal location preference.
+
+    ``status`` is employment eligibility (can I be employed here as an
+    India-based candidate): confirmed / excluded / needs_verification.
+
+    ``preference`` is the personal location preference, kept SEPARATE:
+    mumbai (preferred metro) / relocation (other India) / remote
+    (India-eligible or world-wide remote).
 
     An optional :class:`CompanyRegistry` upgrades a bare/ambiguous remote role
     to ``confirmed`` when the company is known to hire world-wide/India remote.
@@ -237,6 +281,7 @@ def classify_eligibility(job: Job, config: AppConfig, registry=None) -> Eligibil
                 CONFIRMED,
                 f"remote role; company registry: {comp.remote_eligibility}",
                 a,
+                PREF_REMOTE,
             )
     return result
 
@@ -244,30 +289,33 @@ def classify_eligibility(job: Job, config: AppConfig, registry=None) -> Eligibil
 def _classify_from_analysis(job: Job, a: LocationAnalysis, e) -> EligibilityResult:
     if a.is_remote:
         if a.worldwide_remote:
-            return EligibilityResult(CONFIRMED, "worldwide remote (India-eligible)", a)
+            return EligibilityResult(CONFIRMED, "worldwide remote (India-eligible)", a, PREF_REMOTE)
         if a.has_india:
-            return EligibilityResult(CONFIRMED, "remote role open to India", a)
+            return EligibilityResult(CONFIRMED, "remote role open to India", a, PREF_REMOTE)
         if a.restricted_region:
             return EligibilityResult(EXCLUDED,
-                                     f"remote restricted to {a.restricted_region}", a)
+                                     f"remote restricted to {a.restricted_region}", a, "")
         if a.ambiguous_region:
             return EligibilityResult(NEEDS_VERIFICATION,
-                                     f"remote, unclear eligibility ({a.ambiguous_region})", a)
+                                     f"remote, unclear eligibility ({a.ambiguous_region})", a, "")
 
     # On-site / hybrid / unspecified.
     if a.preferred_city:
         return EligibilityResult(CONFIRMED,
-                                 f"preferred city '{a.preferred_city}'", a)
+                                 f"preferred city '{a.preferred_city}'", a, PREF_MUMBAI)
     if a.has_india:
-        if e.india_wide:
+        # Other Indian city -> relocation queue (not the default shortlist).
+        if e.relocation:
             return EligibilityResult(CONFIRMED,
-                                     f"India location '{a.india_city}' (India-wide accepted)", a)
-        return EligibilityResult(NEEDS_VERIFICATION,
-                                 f"India location '{a.india_city}' outside preferred cities", a)
+                                     f"India location '{a.india_city}' (relocation queue)", a,
+                                     PREF_RELOCATION)
+        return EligibilityResult(EXCLUDED,
+                                 f"India location '{a.india_city}' outside preferred cities "
+                                 "and relocation not accepted", a, "")
     if a.restricted_region:
         return EligibilityResult(EXCLUDED,
-                                 f"location restricted to {a.restricted_region}", a)
+                                 f"location restricted to {a.restricted_region}", a, "")
     if e.relocation:
         return EligibilityResult(NEEDS_VERIFICATION,
-                                 "unresolved location (relocation open — review)", a)
-    return EligibilityResult(EXCLUDED, "location not in target and relocation not accepted", a)
+                                 "unresolved location (relocation open — review)", a, "")
+    return EligibilityResult(EXCLUDED, "location not in target and relocation not accepted", a, "")

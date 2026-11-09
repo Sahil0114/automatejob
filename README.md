@@ -2,9 +2,9 @@
 
 A personal, AI-assisted job hunting system. It collects job postings from
 **permitted public job-board feeds** (Greenhouse, Lever and Ashby APIs),
-applies a **hard location/eligibility filter**, stores them deduplicated in
-SQLite with change/closure tracking, and scores how well each role matches a
-configured target profile — with human-readable reasons for every score.
+classifies each role across four hard gates, stores them deduplicated in
+SQLite with change/closure tracking, and produces a **shortlist of genuinely
+actionable junior engineering roles** — never padded with irrelevant jobs.
 
 This tool only **reads** public, documented APIs. It never scrapes gated pages,
 bypasses authentication, sends emails, applies to jobs, or connects to personal
@@ -15,18 +15,19 @@ accounts.
 ## Quick start
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 python -m automatejob sources        # configured boards
 python -m automatejob companies      # company registry
-python -m automatejob collect        # fetch, filter, score, store
-python -m automatejob stats          # aggregate counts
-python -m automatejob list --qualified --all --limit 20
-python -m automatejob export --format csv -o qualified.csv
+python -m automatejob collect        # fetch, classify, score, store, track
+python -m automatejob list --actionable --all
+python -m automatejob list --preference relocation --all
+python -m automatejob daily          # concise daily report
+python -m automatejob export --format csv -o actionable.csv
 ```
 
 The SQLite database is created at `data/jobs.db` (configurable, git-ignored).
+Daily reports land in `reports/` (git-ignored).
 
 ## Requirements
 
@@ -37,97 +38,109 @@ The SQLite database is created at `data/jobs.db` (configurable, git-ignored).
 ```
 python -m automatejob <command> [options]
 
-  collect             fetch all sources, hard-filter, score, store, track
+  collect             fetch all sources, classify, score, store, track
     --min-score N     only show new jobs scoring at least N
     --limit N         cap how many new jobs are shown
 
   list                list stored jobs (new ones by default)
     --all             show all jobs, not just unseen ones
-    --qualified       only confirmed-eligible jobs
-    --eligibility S   filter by confirmed/excluded/needs_verification
+    --actionable      only roles that pass ALL gates (open + role family +
+                      junior seniority + Mumbai/eligible-remote)
+    --eligibility S   confirmed / excluded / needs_verification
+    --preference S    mumbai / relocation / remote
     --min-score N
     --source TYPE     greenhouse / lever / ashby
     --mark-seen       clear the "new" flag
     --no-reasons      hide scoring reasons
 
-  rescore             re-score every stored row in place (no refetch)
+  rescore             re-classify + re-score every stored row (no refetch)
 
   export              write jobs to CSV/JSON
     --format csv|json
-    --all             export every job (default: confirmed-eligible only)
+    --all | --actionable
     -o/--output PATH
 
-  stats               aggregate DB statistics
-  sources             list configured sources
-  companies           list the company registry
+  daily               concise daily report (new actionable, changed, closed,
+                      needs-verification, failed sources)
+    --all             show all actionable jobs, not just new
+    -o/--output PATH
+
+  stats / sources / companies
 
 Global: -c/--config PATH, -v/-vv for logging
 ```
 
-## Eligibility (hard filter, applied BEFORE scoring)
+## The actionable gate
 
-Every job is classified into one of three buckets by `eligibility.py`:
+A job is **actionable** only if it passes ALL four gates (plus open status):
 
-- **confirmed** — preferred on-site/hybrid cities (Mumbai metro: Mumbai,
-  Thane, Navi Mumbai), remote roles explicitly open to India, or genuinely
-  worldwide remote ("Remote - Global", "Anywhere").
-- **excluded** — remote roles restricted to a region that excludes India
-  (US/EU/EMEA/AMER/…), or on-site roles in a named foreign location.
-- **needs_verification** — ambiguous: bare "Remote" with no region, regional
-  remote (APAC/Asia), or unresolvable locations. These are stored separately
-  and are **never** labelled confirmed eligible.
+1. **Engineering role family** (title-driven) — DevOps, SRE, Platform,
+   Infrastructure, Cloud, Go/Python Backend, AI/Automation, QA, or a related
+   engineering internship. HR, sales, support, recruiters, operations,
+   finance, solutions-architects and other non-engineering roles are excluded.
+   Genuinely ambiguous titles go to review.
+2. **Junior seniority** — intern, new-grad, fresher, trainee, entry-level,
+   junior, or a credible 0–2 years requirement. Senior/staff/principal/lead/
+   manager and clearly intermediate roles never enter the shortlist. Uncertain
+   experience ("Software Engineer" with no signal, "L3", title-vs-description
+   conflicts) goes to review.
+3. **Employment eligibility** — India-eligible: Mumbai metro, other India
+   offices, remote-India, or world-wide remote. US/EU-only remote and foreign
+   on-site roles are excluded.
+4. **Location preference** (kept separate from eligibility) — Mumbai/Thane/
+   Navi Mumbai on-site/hybrid, or India-eligible / world-wide remote. Other
+   Indian cities (Bengaluru/Hyderabad/Gurugram) go to a **relocation queue**,
+   not the default shortlist.
 
-`[eligibility]` in config.toml makes the location and relocation preferences
-configurable (`cities`, `india_wide`, `relocation`). The `companies` registry
-can upgrade an ambiguous remote role to confirmed when the company is known to
-hire world-wide/India remote.
+Anything not actionable sits in review or relocation, and ambiguous remote
+stays in needs_verification. If only one job genuinely passes, the report
+shows one job.
 
-## Seniority
+## Configuration (`config.toml`)
 
-`seniority.py` classifies each role into `internship`, `junior` (incl.
-graduate/fresher/trainee/entry-level and credible 0–2 years), `intermediate`,
-`senior` (incl. staff/principal/architect), `lead` (manager/director/head/VP),
-`review` (borderline — never auto-accepted/rejected), or `unknown`.
-Junior/internship roles are prioritised; intermediate/senior/lead are
-identified and ranked lower rather than silently dropped.
-
-## Sources
-
-- **Greenhouse** — `?content=true` retrieves full descriptions; HTML is
-  converted to searchable text (`html.py`).
-- **Lever** — includes `descriptionPlain`.
-- **Ashby** — the public posting API
-  (`https://api.ashbyhq.com/posting-api/job-board/{board}`), verified against
-  the live API. Shipped boards: Kong (Mumbai/Bangalore/Delhi offices),
-  Supabase (worldwide remote), Notion (Hyderabad).
-
-All board tokens are real and were checked against the live API — no company
-boards are fabricated.
+- `[[sources]]` — Greenhouse / Lever / Ashby boards (real, verified tokens).
+- `[[roles]]` / `[[locations]]` — scoring keyword lists and location points.
+- `[eligibility]` — `cities` (Mumbai metro) and `relocation` (accept other
+  India into a relocation queue). Location preference is configurable.
+- `[tracking]` — `close_after_scans` (default 2): a role is marked closed only
+  after it is absent from that many successive successful scans.
+- `[companies]` — path to the company registry.
 
 ## Companies registry
 
 `data/companies.toml` records, per company: name, website, careers URL, ATS
 type, Mumbai-office status, remote hiring eligibility, last-checked timestamp,
 and the source of every claim. Unverified facts are stored as null/"unknown",
-never guessed.
+never guessed. A company known to hire world-wide remote upgrades its bare
+"Remote" roles from needs_verification to confirmed.
 
-## Deduplication & tracking
+## Tracking
 
-- **Per-source dedup key** = SHA-256(normalized company + title + URL).
-- **Cross-board key** = SHA-256(company + title + location), linking the same
-  role on two boards (reported via `stats`, collapsed in the qualified list).
 - **first_seen / last_seen / changed_at** — `content_hash` hashes
   title+description+location; a re-seen posting with a different hash stamps
   `changed_at`.
-- **Closure** — a role is only marked `closed` after it has been absent from
-  `close_after_scans` successive *successful* scans of its source (default 2).
-  A reappearing role is reopened.
+- **status (open/closed)** — a role closes only after `close_after_scans`
+  successive successful scans without it; a reappearing role reopens.
+- **cross_board_key** — company+title+location, linking the same role on two
+  boards.
 
-## Scoring model (0–100, fully explained)
+## Scheduling
 
-Role (max 40), Location (max 35, eligibility-driven), Seniority (±), Internship
-(+10). Every stored row keeps `score_reasons` as JSON. A role with no
-target-role match and no internship signal is capped at `irrelevant_cap`.
+A read-only collection runs three times a day (09:00 / 15:00 / 21:00
+Asia/Kolkata) via Hermes cron in **script/no-agent mode** — no LLM runs on the
+schedule. The entrypoint `scripts/collect.sh`:
+
+- uses `flock` so overlapping runs are skipped,
+- bounds each run with `timeout` (default 540s),
+- uses stable absolute paths and the system Python,
+- writes `reports/collect-*.log` and `reports/daily.txt`,
+- exits non-zero on failure.
+
+Run it manually at any time:
+
+```bash
+bash /home/sahil/Work/automatejob/scripts/collect.sh
+```
 
 ## Tests
 
@@ -135,28 +148,27 @@ target-role match and no internship signal is capped at `irrelevant_cap`.
 python -m unittest discover -s tests
 ```
 
-Covers normalization, dedup, scoring, eligibility (Mumbai vs Bengaluru,
-India-remote, ambiguous remote), seniority (junior/graduate/intermediate/
-senior/lead/review), HTML→text (incl. malformed input), source failures,
-Ashby/GH/Lever parsing, closure/change tracking, and cross-board duplicates.
+85 tests cover normalization, dedup, scoring, eligibility (Mumbai vs Bengaluru,
+India-remote, ambiguous remote, foreign cities), role-family classification
+(20+ adversarial titles), seniority (junior/graduate/intermediate/senior/lead/
+review, "Software Engineer 3", L-levels), the actionable gate, HTML→text,
+source failures, Ashby/GH/Lever parsing, closure/change tracking, and
+cross-board duplicates.
 
 ## Limitations
 
-- **Keyword matching is heuristic.** It is a filter/ranker, not a recruiter —
+- **Keyword/title matching is heuristic.** It is a filter, not a recruiter —
   always read the actual posting before applying.
-- **"Remote" with no region is deliberately treated as needs_verification.**
-  Many employers mean US-only; we do not guess. Verify with the employer.
-- **Remote region detection is pattern-based.** Some boards phrase regions
-  unconventionally and may be mis-bucketed (rarely confirmed when ambiguous).
-- **Only Greenhouse, Lever and Ashby** are implemented. Workday/Jobvite/
-  LinkedIn/Indeed are not public APIs and are out of scope.
+- **"Remote" with no region is deliberately needs_verification**, as are
+  roles with no stated experience. We do not guess.
+- **Foreign detection is city/country-list based.** Uncommon cities may leak
+  into needs_verification (conservatively, never into the shortlist).
+- **Only Greenhouse, Lever and Ashby** are implemented; Workday/Jobvite/
+  LinkedIn/Indeed have no public API.
 - **Cross-board dedup collapses on company+title+location**, so two genuinely
-  different roles with identical title at the same company/location are linked
-  — acceptable for a personal tracker, noted for transparency.
-- **Closure needs ≥2 successful scans**, so a board that is down for two runs
-  does not (correctly) close roles — failed scans never count against a role.
-- Feed availability changes over time: a failed source is logged and skipped
-  without aborting the run.
+  different same-title roles at one company/location link together.
+- The current boards skew senior and US/EU, so the genuinely actionable junior
+  India-eligible list is short by design — that is expected, not a bug.
 
 ## Data & privacy
 

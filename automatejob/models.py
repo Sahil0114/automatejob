@@ -101,6 +101,9 @@ class Job:
     eligibility: str = ""            # confirmed | excluded | needs_verification
     eligibility_reason: str = ""
     seniority: str = ""              # level from seniority.py
+    role_family: str = ""            # engineering family from role_family.py
+    location_preference: str = ""    # mumbai | relocation | remote
+    actionable: int = 0              # 1 when all gates pass
 
     @property
     def company_normalized(self) -> str:
@@ -152,4 +155,7 @@ class Job:
             "eligibility": self.eligibility,
             "eligibility_reason": self.eligibility_reason,
             "seniority": self.seniority,
+            "role_family": self.role_family,
+            "location_preference": self.location_preference,
+            "actionable": self.actionable,
         }

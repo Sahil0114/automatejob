@@ -1,4 +1,4 @@
-"""Orchestrates source adapters, eligibility filtering, scoring, and storage."""
+"""Orchestrates source adapters, qualification, scoring, and storage."""
 
 from __future__ import annotations
 
@@ -7,10 +7,9 @@ from typing import List, Optional, Tuple
 
 from .companies import CompanyRegistry
 from .config import AppConfig
-from .eligibility import EXCLUDED, classify_eligibility
 from .models import Job
+from .qualification import classify_job
 from .scoring import Scorer
-from .seniority import classify_seniority
 from .sources import build_source
 from .sources.base import SourceError
 from .storage import Storage
@@ -34,8 +33,13 @@ class Collector:
                 log.warning("skipping source %r: %s", sc.token, exc)
         return sources
 
+    def classify_and_score(self, job: Job) -> None:
+        """Fill in all classification fields, then score (for ranking only)."""
+        classify_job(job, self.config, self.registry)
+        self.scorer.score(job)
+
     def collect(self) -> Tuple[List[Job], List[dict]]:
-        """Fetch, hard-filter, score and store jobs from every source.
+        """Fetch, qualify, score and store jobs from every source.
 
         Returns (newly_discovered_jobs, errors). A per-source failure is
         recorded and skipped; it never aborts the whole run.
@@ -47,23 +51,8 @@ class Collector:
             try:
                 jobs = source.fetch()
                 seen_dedup_keys: set = set()
-                scored = 0
-                excluded = 0
                 for job in jobs:
-                    res = classify_eligibility(job, self.config, self.registry)
-                    job.eligibility = res.status
-                    job.eligibility_reason = res.reason
-                    job.seniority = classify_seniority(job)
-                    if res.status == EXCLUDED:
-                        job.score = 0.0
-                        job.score_reasons = [{
-                            "factor": "eligibility", "points": 0.0,
-                            "detail": f"excluded: {res.reason}",
-                        }]
-                        excluded += 1
-                    else:
-                        self.scorer.score(job)
-                        scored += 1
+                    self.classify_and_score(job)
                     seen_dedup_keys.add(job.dedup_key)
 
                 new_jobs = self.storage.upsert_jobs(jobs)
@@ -72,8 +61,9 @@ class Collector:
                     source.source_type, source.token,
                     seen_dedup_keys, self.config.close_after_scans,
                 )
-                log.info("%s: fetched %d (scored %d, excluded %d), %d newly discovered",
-                         label, len(jobs), scored, excluded, len(new_jobs))
+                actionable = sum(1 for j in jobs if j.actionable)
+                log.info("%s: fetched %d (%d actionable), %d newly discovered",
+                         label, len(jobs), actionable, len(new_jobs))
                 all_new.extend(new_jobs)
             except SourceError as exc:
                 log.error("%s: %s", label, exc)
@@ -85,24 +75,11 @@ class Collector:
         return all_new, errors
 
     def rescore(self) -> int:
-        """Re-score every stored row against the current config, in place.
-
-        Used when scoring weights/roles/eligibility change: updates existing
-        records without re-fetching anything.
-        """
+        """Re-classify + re-score every stored row in place (no refetch)."""
         updated = 0
         for row in self.storage.iter_jobs():
             job = self._row_to_job(row)
-            res = classify_eligibility(job, self.config, self.registry)
-            job.eligibility = res.status
-            job.eligibility_reason = res.reason
-            job.seniority = classify_seniority(job)
-            if res.status == EXCLUDED:
-                job.score = 0.0
-                job.score_reasons = [{"factor": "eligibility", "points": 0.0,
-                                      "detail": f"excluded: {res.reason}"}]
-            else:
-                self.scorer.score(job)
+            self.classify_and_score(job)
             self.storage.update_score(row["id"], job)
             updated += 1
         self.storage.conn.commit()
