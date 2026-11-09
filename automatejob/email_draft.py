@@ -18,8 +18,31 @@ DRAFT_INTERNSHIP = "internship"
 DRAFT_REFERRAL = "referral"
 DRAFT_FOUNDER = "founder"
 DRAFT_FOLLOWUP = "followup"
+DRAFT_CTO = "cto"
+DRAFT_EM = "engineering_manager"
+DRAFT_RECRUITER = "recruiter"
 
-DRAFT_TYPES = (DRAFT_VACANCY, DRAFT_INTERNSHIP, DRAFT_REFERRAL, DRAFT_FOUNDER, DRAFT_FOLLOWUP)
+DRAFT_TYPES = (DRAFT_VACANCY, DRAFT_INTERNSHIP, DRAFT_REFERRAL, DRAFT_FOUNDER,
+               DRAFT_FOLLOWUP, DRAFT_CTO, DRAFT_EM, DRAFT_RECRUITER)
+
+# Map a contact role_kind to the most appropriate draft template.
+ROLE_TO_DRAFT = {
+    "cto": DRAFT_CTO,
+    "founder": DRAFT_FOUNDER,
+    "ceo": DRAFT_FOUNDER,
+    "engineering_manager": DRAFT_EM,
+    "em": DRAFT_EM,
+    "infra_lead": DRAFT_EM,
+    "platform_lead": DRAFT_EM,
+    "devops_lead": DRAFT_EM,
+    "recruiter": DRAFT_RECRUITER,
+    "talent": DRAFT_RECRUITER,
+    "engineer": DRAFT_REFERRAL,
+}
+
+
+def draft_type_for_role(role_kind: str) -> str:
+    return ROLE_TO_DRAFT.get((role_kind or "").lower(), DRAFT_REFERRAL)
 
 
 def _headline_experience(profile: CandidateProfile) -> str:
@@ -172,6 +195,50 @@ def draft_email(profile: CandidateProfile, company: dict, contact: Optional[dict
             "",
             name,
         ]
+    elif draft_type in (DRAFT_CTO, DRAFT_EM):
+        audience = "the team" if draft_type == DRAFT_EM else "you"
+        subject = f"Backend/DevOps help for {company_name}"
+        body_lines = [
+            contact_greeting,
+            "",
+            f"I'm {name}, a DevOps/backend engineer — I spend most of my time on "
+            f"Kubernetes, Terraform and Go APIs, and I'm reaching out because "
+            f"{company_name} seems like a team I could genuinely help.",
+            "",
+            "Recent work:",
+        ]
+        body_lines += [f"- {b}" for b in _experience_bullets(profile)[:3]]
+        if insight:
+            body_lines += ["", f"I saw {insight['fact']} ({insight.get('url', '')})."]
+        body_lines += [
+            "",
+            f"I'd love to contribute on the infrastructure/backend side — is there "
+            f"a junior role, internship, or a project I could help with?",
+            "",
+            f"Portfolio: {portfolio}",
+            "",
+            name,
+        ]
+    elif draft_type == DRAFT_RECRUITER:
+        subject = f"Junior DevOps/backend roles at {company_name}"
+        body_lines = [
+            contact_greeting,
+            "",
+            f"I'm {name}, a DevOps/backend engineer (Go, Kubernetes, Terraform, AWS). "
+            f"I'm looking for junior or new-graduate engineering roles and wanted to "
+            f"check whether {company_name} has anything open, or might soon.",
+            "",
+            "A snapshot of my experience:",
+        ]
+        body_lines += [f"- {b}" for b in _experience_bullets(profile)[:3]]
+        body_lines += [
+            "",
+            f"Portfolio: {portfolio}",
+            "",
+            "Would you be able to point me to the right role or team?",
+            "",
+            name,
+        ]
     else:  # followup
         subject = f"Following up — {company_name}"
         body_lines = [
@@ -190,3 +257,13 @@ def draft_email(profile: CandidateProfile, company: dict, contact: Optional[dict
 
     evidence_map = build_evidence_map(profile, company, evidence, draft_type)
     return {"subject": subject, "body": "\n".join(body_lines), "evidence_map": evidence_map}
+
+
+def draft_for_contact(profile: CandidateProfile, company: dict, contact: dict,
+                      evidence: Optional[List[dict]] = None,
+                      job_title: Optional[str] = None) -> dict:
+    """Generate a draft tailored to a contact's role (founder/CTO/EM/recruiter/etc)."""
+    role = (contact or {}).get("role_kind", "") or ""
+    draft_type = draft_type_for_role(role)
+    return draft_email(profile, company, contact, draft_type,
+                       evidence=evidence, job_title=job_title)

@@ -113,3 +113,76 @@ def relevant_opening_companies(jobs_storage, company_names: List[str]) -> set:
         list(names),
     ).fetchall()
     return {r["company_normalized"] for r in rows}
+
+
+# ---------------------------------------------------------------------------
+# Outreach-readiness score (distinct from the general company-fit score).
+#
+# A company is outreach-ready ONLY when there is verifiable evidence, not just
+# a YC batch, a relevant technology, or a Mumbai location. Each factor requires
+# a source. A company with an uncertain domain, inactive-looking operations, or
+# an unsupported justification must NOT become outreach-ready.
+# ---------------------------------------------------------------------------
+
+_HIRING_KINDS = {"hiring", "expansion", "job_posting"}
+_SIGNAL_KINDS = {"product_launch", "eng_blog", "oss", "hiring", "expansion"}
+
+
+def outreach_readiness(company: dict, evidence: List[dict],
+                       active_website: Optional[bool] = None,
+                       junior_hypothesis: Optional[str] = None) -> dict:
+    """Score 0-100 plus a hard `ready` gate and traceable reasons.
+
+    `evidence` is a list of {kind, fact, url, observed_at} from company research.
+    `active_website` is None when unverified (unknown, not assumed active).
+    """
+    reasons: List[dict] = []
+    pts = 0.0
+
+    def add(factor, p, detail):
+        nonlocal pts
+        pts += p
+        reasons.append({"factor": factor, "points": p, "detail": detail})
+
+    domain = (company.get("domain") or "").strip()
+    if domain and domain != "unknown":
+        add("domain", 15, f"canonical domain {domain}")
+    else:
+        add("domain", -100, "domain uncertain — NOT outreach-ready")
+
+    if active_website is True:
+        add("active_website", 15, "website confirmed active")
+    elif active_website is False:
+        add("active_website", -100, "website appears inactive — NOT outreach-ready")
+    # active_website None => unknown, no points, no penalty.
+
+    techs = company.get("technologies") or []
+    if techs:
+        add("tech", min(15, 3 * len(techs[:5])), f"engineering relevance: {', '.join(techs[:5])}")
+
+    if company.get("mumbai_office") is True:
+        add("mumbai", 20, "verified Mumbai office/engineering")
+    if (company.get("remote_policy") or "") in (REMOTE_INDIA, REMOTE_WORLDWIDE):
+        add("remote", 20, f"verified {company.get('remote_policy')} eligibility")
+
+    has_signal = any(e.get("kind") in _SIGNAL_KINDS for e in evidence)
+    has_hiring = any(e.get("kind") in _HIRING_KINDS for e in evidence)
+    if has_signal:
+        add("signal", 15, "recent engineering/hiring/expansion signal with source")
+    if has_hiring:
+        add("hiring", 10, "explicit hiring/expansion evidence")
+    if junior_hypothesis:
+        add("junior", 10, f"early-career hypothesis: {junior_hypothesis[:80]}")
+    if evidence:
+        # one verified company-specific observation with a URL and date
+        sourced = [e for e in evidence if e.get("url")]
+        if sourced:
+            add("observation", 5, f"{len(sourced)} sourced observation(s)")
+
+    pts = round(max(0.0, min(100.0, pts)), 1)
+    # Hard gate: domain known + active + at least one sourced signal/hiring.
+    ready = (bool(domain and domain != "unknown")
+             and active_website is not False
+             and has_signal
+             and pts >= 55)
+    return {"score": pts, "ready": ready, "reasons": reasons}

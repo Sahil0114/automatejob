@@ -14,13 +14,16 @@ from pathlib import Path
 from .collector import Collector
 from .companies import CompanyRegistry
 from .company import CompanyStorage
+from .company_scoring import outreach_readiness
 from .config import AppConfig
 from .discovery import CompanyDiscovery
 from .email_draft import DRAFT_TYPES, draft_email
+from .gmail import GmailAdapter, GmailConfig
 from .outreach import OutreachStorage
 from .pipeline import build_shortlist
 from .profile import AnswerBank, CandidateProfile, UnverifiedField
 from .storage import Storage
+from .workflow import add_contact_and_draft, import_contacts_csv
 
 log = logging.getLogger("automatejob")
 
@@ -318,6 +321,24 @@ def cmd_daily(cfg: AppConfig, args) -> int:
         else:
             out.append(f"Failed sources: 0 (last run {last.get('ran_at', 'unknown')})")
 
+        # Outreach pipeline summary.
+        try:
+            outr = OutreachStorage(cfg.outreach_db_path)
+            m = outr.metrics()
+            drafts = outr.list_drafts(state="awaiting_approval")
+            followups = outr.list_due_followups()
+            out.append("")
+            out.append("Outreach pipeline:")
+            out.append(f"  companies {m['companies']} | contacts {m['contacts']} "
+                       f"(verified {m['contacts_verified']}) | drafts {m['drafts']} "
+                       f"| sent {m['sent']} | replies {m['replies']} | interviews {m['interviews']}")
+            out.append(f"  drafts awaiting approval: {len(drafts)}")
+            out.append(f"  follow-ups due: {len(followups)}")
+            outr.close()
+        except Exception as exc:  # outreach DB may not exist yet
+            out.append("")
+            out.append(f"Outreach pipeline: unavailable ({exc})")
+
         text = "\n".join(out) + "\n"
         if args.output:
             Path(args.output).write_text(text, encoding="utf-8")
@@ -436,6 +457,22 @@ def cmd_ats(cfg: AppConfig, args) -> int:
 
 def cmd_profile(cfg: AppConfig, args) -> int:
     prof = CandidateProfile(args.path)
+    if args.confirm:
+        out = OutreachStorage(cfg.outreach_db_path)
+        try:
+            for item in args.confirm:
+                field, _, value = item.partition("=")
+                if not field or not value:
+                    print(f"  invalid --confirm {item!r} (expected field=value)")
+                    continue
+                out.confirm_profile(field.strip(), value.strip(), source="cli")
+                print(f"  confirmed {field.strip()}={value.strip()}")
+        finally:
+            out.close()
+        print("Confirmed fields:")
+        for k, v in OutreachStorage(cfg.outreach_db_path).list_profile_confirmations().items():
+            print(f"  {k}: {v}")
+        return 0
     print("Candidate profile:")
     print(f"  name:       {prof.name}")
     print(f"  email:      {prof.email}")
@@ -450,6 +487,10 @@ def cmd_profile(cfg: AppConfig, args) -> int:
     print(f"\nUnverified fields needing confirmation ({len(missing)}):")
     for m in missing:
         print(f"  - {m}")
+    if missing:
+        print("\nConfirm locally with:")
+        for m in missing:
+            print(f"  python3 -m automatejob profile --confirm {m}=<value>")
     return 0
 
 
@@ -518,14 +559,25 @@ def cmd_draft(cfg: AppConfig, args) -> int:
 
 def cmd_dashboard(cfg: AppConfig, args) -> int:
     from .dashboard import run_dashboard
+    import os
     out = OutreachStorage(cfg.outreach_db_path)
     cstore = CompanyStorage(cfg.companies_db_path)
-    token = args.token or ""
+    token = args.token or os.environ.get("AUTOMATEJOB_DASHBOARD_TOKEN", "")
+    profile = CandidateProfile("data/candidate_profile.toml")
+    gmail = GmailAdapter(GmailConfig(
+        credentials_file=os.environ.get("GMAIL_CREDENTIALS_FILE", ""),
+        token_file=os.environ.get("GMAIL_TOKEN_FILE", "")),
+        sending_enabled=args.enable_send)
     server, _ = run_dashboard(out, companies_store=cstore, host=args.host,
-                              port=args.port, token=token)
+                              port=args.port, token=token,
+                              gmail=gmail, profile=profile,
+                              sending_enabled=args.enable_send)
     url = f"http://{args.host}:{args.port}"
-    print(f"Dashboard running at {url}" + (f"?token={token}" if token else ""))
-    print("Press Ctrl+C to stop.")
+    print(f"Dashboard running at {url}")
+    if not token:
+        print("WARNING: no token set — open to any local process. "
+              "Set AUTOMATEJOB_DASHBOARD_TOKEN or pass --token.")
+    print("Sign in at /login with the token. Sending is DISABLED by default.")
     try:
         import time
         while True:
@@ -533,6 +585,78 @@ def cmd_dashboard(cfg: AppConfig, args) -> int:
     except KeyboardInterrupt:
         server.shutdown()
     return 0
+
+
+def cmd_contact(cfg: AppConfig, args) -> int:
+    out = OutreachStorage(cfg.outreach_db_path)
+    profile = CandidateProfile("data/candidate_profile.toml")
+    try:
+        if args.import_csv:
+            result = import_contacts_csv(out, profile, args.import_csv)
+            print(f"imported {result['imported']}, skipped {result['skipped']}")
+            for e in result["errors"]:
+                print(f"  error: {e}")
+            return 0
+        if args.add:
+            r = add_contact_and_draft(
+                out, profile, args.company, args.name, args.title, args.role,
+                args.email, email_status=args.email_status,
+                linkedin_url=args.linkedin, source_url=args.source)
+            print(f"contact #{r.contact_id}")
+            for w in r.warnings:
+                print(f"  warning: {w}")
+            if r.draft.get("body"):
+                print(f"\nSubject: {r.draft['subject']}\n\n{r.draft['body']}")
+            return 0
+        # default: list
+        for c in out.list_contacts_joined():
+            print(f"#{c['id']} [{c['email_status']:11s}] {c['full_name']:24s} "
+                  f"{c['title'][:24]:24s} @ {c.get('company_name') or c['company_id']} "
+                  f"{c['email']}")
+        return 0
+    finally:
+        out.close()
+
+
+def cmd_linkedin(cfg: AppConfig, args) -> int:
+    out = OutreachStorage(cfg.outreach_db_path)
+    try:
+        if args.add:
+            tid = out.add_linkedin_task(args.company, None, args.url,
+                                        connection_note=args.note or "",
+                                        post_accept_msg=args.message or "")
+            print(f"linkedin task #{tid}")
+            return 0
+        if args.status and args.id:
+            out.set_linkedin_status(args.id, args.status)
+            print(f"task #{args.id} -> {args.status}")
+            return 0
+        for t in out.list_linkedin_tasks():
+            print(f"#{t['id']} [{t['status']:12s}] {t['profile_url']} "
+                  f"(company {t['company_id']})")
+            if t["next_action"]:
+                print(f"    next: {t['next_action']}")
+        return 0
+    finally:
+        out.close()
+
+
+def cmd_readiness(cfg: AppConfig, args) -> int:
+    out = OutreachStorage(cfg.outreach_db_path)
+    try:
+        rows = out.conn.execute(
+            "SELECT * FROM outreach_companies ORDER BY score DESC LIMIT ?",
+            (args.limit,)).fetchall()
+        for r in rows:
+            evidence = out.list_evidence(r["company_id"])
+            ready = outreach_readiness(dict(r), evidence)
+            mark = "READY" if ready["ready"] else "     "
+            print(f"{mark} {ready['score']:5.1f} {r['name']:24s} ({r['domain']})")
+            for reason in ready["reasons"]:
+                print(f"        {reason['factor']:16s} {reason['points']:+6.1f}  {reason['detail']}")
+        return 0
+    finally:
+        out.close()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -622,8 +746,10 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("--careers", default="")
     pa.set_defaults(func=cmd_ats)
 
-    pp = sub.add_parser("profile", help="show the verified candidate profile")
+    pp = sub.add_parser("profile", help="show/confirm the verified candidate profile")
     pp.add_argument("--path", default="data/candidate_profile.toml")
+    pp.add_argument("--confirm", action="append", metavar="FIELD=VALUE",
+                    help="confirm a profile field locally (e.g. notice_period='2 weeks')")
     pp.set_defaults(func=cmd_profile)
 
     pl2 = sub.add_parser("pipeline", help="qualify companies into the outreach pipeline")
@@ -643,8 +769,39 @@ def build_parser() -> argparse.ArgumentParser:
     pda = sub.add_parser("dashboard", help="run the local web dashboard")
     pda.add_argument("--host", default="127.0.0.1")
     pda.add_argument("--port", type=int, default=8090)
-    pda.add_argument("--token", default="", help="bearer token (empty = no auth)")
+    pda.add_argument("--token", default="", help="access token (or env AUTOMATEJOB_DASHBOARD_TOKEN)")
+    pda.add_argument("--enable-send", action="store_true",
+                     help="DANGER: allow actually sending email (default off)")
     pda.set_defaults(func=cmd_dashboard)
+
+    pc = sub.add_parser("contact", help="add/list/import contacts (manual enrichment)")
+    pc.add_argument("--add", action="store_true", help="add a contact")
+    pc.add_argument("--company", help="company_id")
+    pc.add_argument("--name", help="full name")
+    pc.add_argument("--title", help="job title")
+    pc.add_argument("--role", default="engineer",
+                    help="role_kind: cto/founder/engineering_manager/recruiter/engineer")
+    pc.add_argument("--email", help="email address")
+    pc.add_argument("--email-status", default="unverified",
+                    choices=["unverified", "verified", "unavailable"])
+    pc.add_argument("--linkedin", default="", help="linkedin url")
+    pc.add_argument("--source", default="", help="source url")
+    pc.add_argument("--import-csv", help="import contacts from CSV")
+    pc.set_defaults(func=cmd_contact)
+
+    pli = sub.add_parser("linkedin", help="LinkedIn manual outreach queue")
+    pli.add_argument("--add", action="store_true")
+    pli.add_argument("--company", help="company_id")
+    pli.add_argument("--url", help="profile url")
+    pli.add_argument("--note", default="", help="connection note")
+    pli.add_argument("--message", default="", help="post-acceptance message")
+    pli.add_argument("--id", type=int, help="task id (for --status)")
+    pli.add_argument("--status", help="new status")
+    pli.set_defaults(func=cmd_linkedin)
+
+    prd = sub.add_parser("readiness", help="outreach-readiness score for shortlisted companies")
+    prd.add_argument("--limit", type=int, default=20)
+    prd.set_defaults(func=cmd_readiness)
 
     return p
 

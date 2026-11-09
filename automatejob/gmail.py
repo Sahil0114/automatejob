@@ -21,9 +21,10 @@ class GmailConfig:
 
 
 class GmailAdapter:
-    def __init__(self, config: GmailConfig):
+    def __init__(self, config: GmailConfig, sending_enabled: bool = False):
         self.config = config
-        self.dry_run = True  # never send during this phase
+        self.sending_enabled = sending_enabled  # False => never send, even if authorized
+        self.dry_run = True  # no live Gmail until OAuth is wired and enabled
 
     def available(self) -> bool:
         return bool(self.config.credentials_file and self.config.token_file)
@@ -32,14 +33,31 @@ class GmailAdapter:
     def draft_idempotency_key(company_id: str, contact_email: str, draft_type: str) -> str:
         return hashlib.sha256(f"{company_id}|{contact_email}|{draft_type}".encode()).hexdigest()
 
-    def create_draft(self, subject: str, body: str, to_addr: str) -> dict:
-        """Create a draft. Dry-run: returns a placeholder and NEVER writes to Gmail."""
+    def save_draft(self, subject: str, body: str, to_addr: str) -> dict:
+        """Create a Gmail draft. Returns a status; a draft is NOT a sent email."""
         if not self.available():
             return {"status": "unavailable", "draft_id": "", "error": "Gmail not authorized"}
         if self.dry_run:
-            return {"status": "dry_run", "draft_id": f"dry-{hashlib.sha256(body.encode()).hexdigest()[:12]}",
+            return {"status": "dry_run",
+                    "draft_id": f"dry-{hashlib.sha256(body.encode()).hexdigest()[:12]}",
                     "error": ""}
-        return {"status": "unavailable", "draft_id": "", "error": "live send disabled in this phase"}
+        # Live path (requires authorized OAuth): create a draft via the Gmail
+        # API and return its real draft id. Not implemented without credentials.
+        return {"status": "unavailable", "draft_id": "", "error": "live draft creation requires OAuth"}
+
+    def send(self, to_addr: str, subject: str, body: str) -> dict:
+        """Send a message. Hard-gated by sending_enabled and authorization."""
+        if not self.sending_enabled:
+            return {"status": "failed", "error": "sending disabled"}
+        if not self.available():
+            return {"status": "failed", "error": "Gmail not authorized"}
+        if self.dry_run:
+            return {"status": "confirmation_unknown",
+                    "thread_id": "", "message_id": "",
+                    "error": "dry-run: nothing sent, reconcile before retry"}
+        # Live send via Gmail API returns {status: sent|confirmation_unknown,
+        # thread_id, message_id}. Not reachable without OAuth.
+        return {"status": "failed", "error": "live send requires OAuth"}
 
     def list_threads(self, query: str = "") -> List[dict]:
         if not self.available():

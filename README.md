@@ -183,6 +183,32 @@ history. **Nothing sends email or applies to jobs** — drafts and follow-ups
 require explicit approval, and the Gmail/Apollo adapters are dry-run only until
 credentials are authorized.
 
+### Manual contact enrichment (no Apollo API required)
+
+The primary contact workflow is manual: paste an email retrieved from Apollo
+into the dashboard (or `contact --add`), and the system validates it, checks
+duplicates and suppression lists, and auto-generates a role-tailored draft
+(founder / CTO / engineering manager / recruiter / referral). `contact
+--import-csv` bulk-loads a CSV. `readiness` scores companies on outreach
+readiness (distinct from company fit). Manually-entered emails are marked
+`unverified` until verification evidence is supplied.
+
+### Dashboard security
+
+The dashboard uses HMAC-signed session cookies (plus an optional bearer
+header), never query-string tokens. It binds to localhost by default; access
+from your iPhone over a private tunnel (Tailscale) or an authenticated reverse
+proxy, always with `--token` set. Sending is disabled unless `--enable-send`
+is explicitly passed AND Gmail OAuth is authorized.
+
+### Sources
+
+Configured job sources now include Greenhouse / Lever / Ashby boards, the
+Hacker News "Who is hiring?" monthly thread (Algolia API), and the SimplifyJobs
+Summer-2027 internships + New-Grad lists (public GitHub README tables, original
+employer links retained). US/Canada-only roles are excluded by the eligibility
+gate, not assumed open to India.
+
 ## Tracking
 
 - **first_seen / last_seen / changed_at** — `content_hash` hashes

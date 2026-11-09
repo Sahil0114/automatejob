@@ -7,14 +7,19 @@ API and normalises them into `Job` objects. New sources subclass `BaseSource`.
 from .ashby import AshbySource
 from .base import BaseSource
 from .greenhouse import GreenhouseSource
+from .hn import HNSource
 from .lever import LeverSource
+from .simplifyjobs import SimplifyJobsSource
 
-__all__ = ["BaseSource", "GreenhouseSource", "LeverSource", "AshbySource"]
+__all__ = ["BaseSource", "GreenhouseSource", "LeverSource", "AshbySource",
+           "HNSource", "SimplifyJobsSource"]
 
 SOURCE_REGISTRY = {
     "greenhouse": GreenhouseSource,
     "lever": LeverSource,
     "ashby": AshbySource,
+    "hn": HNSource,
+    "simplifyjobs": SimplifyJobsSource,
 }
 
 

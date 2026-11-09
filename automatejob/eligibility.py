@@ -38,9 +38,12 @@ ALL_STATUSES = (CONFIRMED, EXCLUDED, NEEDS_VERIFICATION)
 
 
 # Remote region labels that mean the role is open to anywhere (including India).
+# NOTE: "fully remote", "remote-first" etc. describe the WORK arrangement
+# (no office), NOT geographic eligibility — a fully-remote company can still
+# restrict to US-only. Only genuine geographic markers belong here.
 _WORLDWIDE_REMOTE = [
-    "global", "worldwide", "anywhere", "world", "remote first", "remote-first",
-    "fully remote", "global remote",
+    "global", "worldwide", "anywhere", "world", "global remote",
+    "any timezone", "any time zone", "all timezones", "all time zones",
 ]
 
 # Remote region labels that COULD include India but are not specific enough
@@ -155,6 +158,7 @@ class LocationAnalysis:
 
 
 def analyze_location(job: Job, config: AppConfig) -> LocationAnalysis:
+    import re
     location_raw = job.location or ""
     location = location_raw.lower()
     workplace = (job.workplace_type or "").lower()
@@ -177,7 +181,13 @@ def analyze_location(job: Job, config: AppConfig) -> LocationAnalysis:
     for city in _INDIA_CITIES:
         if a.india_city:
             break
-        if _kw(city, text):
+        # "india" must be word-boundary matched: it is a prefix of
+        # "Indianapolis" / "Indiana" and must not fire on those.
+        if city == "india":
+            hit = bool(re.search(r"\bindia\b", text))
+        else:
+            hit = _kw(city, text)
+        if hit:
             a.india_city = city
             a.has_india = True
 

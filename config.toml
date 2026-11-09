@@ -89,6 +89,21 @@ type = "ashby"
 token = "notion"
 name = "Notion"
 
+[[sources]]
+type = "hn"
+token = "latest"
+name = "Hacker News: Who is hiring?"
+
+[[sources]]
+type = "simplifyjobs"
+token = "Summer2027-Internships"
+name = "SimplifyJobs: Summer 2027 Internships"
+
+[[sources]]
+type = "simplifyjobs"
+token = "New-Grad-Positions"
+name = "SimplifyJobs: New Grad Positions"
+
 # ---- target roles ---------------------------------------------------------
 # A role's keywords are matched against the job title (and description where
 # the source provides one). Short keywords (<=3 chars) are word-boundary

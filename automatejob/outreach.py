@@ -163,7 +163,46 @@ CREATE TABLE IF NOT EXISTS audit_events (
     note             TEXT NOT NULL DEFAULT '',
     at               TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS suppression (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope            TEXT NOT NULL,      -- company / email / contact
+    key              TEXT NOT NULL,      -- company_id or normalized email or contact_id
+    reason           TEXT NOT NULL DEFAULT '',
+    created_at       TEXT NOT NULL,
+    UNIQUE(scope, key)
+);
+CREATE TABLE IF NOT EXISTS linkedin_tasks (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id       TEXT NOT NULL,
+    contact_id       INTEGER,
+    profile_url      TEXT NOT NULL DEFAULT '',
+    connection_note  TEXT NOT NULL DEFAULT '',
+    post_accept_msg  TEXT NOT NULL DEFAULT '',
+    referral_request TEXT NOT NULL DEFAULT '',
+    status           TEXT NOT NULL DEFAULT 'pending',  -- pending/in_progress/invited/connected/done/skipped
+    last_action      TEXT NOT NULL DEFAULT '',
+    next_action      TEXT NOT NULL DEFAULT '',
+    updated_at       TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS profile_confirmations (
+    field            TEXT PRIMARY KEY,
+    value            TEXT NOT NULL DEFAULT '',
+    source           TEXT NOT NULL DEFAULT '',
+    confirmed_at     TEXT NOT NULL
+);
 """
+
+# Outbound message states (kept distinct from Gmail draft states).
+MSG_DRAFT = "draft"
+MSG_GMAIL_DRAFT = "gmail_draft"
+MSG_APPROVED = "approved"
+MSG_SENT = "sent"
+MSG_REPLIED = "replied"
+MSG_BOUNCED = "bounced"
+MSG_REJECTED = "rejected"
+MSG_OPTED_OUT = "opted_out"
+MSG_CONFIRMATION_UNKNOWN = "confirmation_unknown"
+MSG_FAILED = "failed"
 
 
 def _now() -> str:
@@ -380,6 +419,135 @@ class OutreachStorage:
             out.append(dict(r))
         self.conn.commit()
         return out
+
+    # -- suppression ---------------------------------------------------------
+    def suppress(self, scope: str, key: str, reason: str = "") -> bool:
+        """Scope is 'company' (company_id), 'email' (normalized email) or
+        'contact' (contact_id). Returns True if newly added."""
+        cur = self.conn.execute(
+            "INSERT OR IGNORE INTO suppression (scope,key,reason,created_at) VALUES (?,?,?,?)",
+            (scope, key, reason, _now()))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def unsuppress(self, scope: str, key: str) -> bool:
+        cur = self.conn.execute("DELETE FROM suppression WHERE scope=? AND key=?",
+                                (scope, key))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def is_suppressed(self, company_id: Optional[str] = None,
+                      email: Optional[str] = None, contact_id: Optional[int] = None) -> bool:
+        if company_id and self.conn.execute(
+                "SELECT 1 FROM suppression WHERE scope='company' AND key=?", (company_id,)).fetchone():
+            return True
+        if email and self.conn.execute(
+                "SELECT 1 FROM suppression WHERE scope='email' AND key=?",
+                (email.strip().lower(),)).fetchone():
+            return True
+        if contact_id is not None and self.conn.execute(
+                "SELECT 1 FROM suppression WHERE scope='contact' AND key=?",
+                (str(contact_id),)).fetchone():
+            return True
+        return False
+
+    # -- contacts (email-aware) ---------------------------------------------
+    def contact_by_email(self, email: str) -> Optional[dict]:
+        row = self.conn.execute(
+            "SELECT * FROM contacts WHERE lower(email)=?", (email.strip().lower(),)).fetchone()
+        return dict(row) if row else None
+
+    def get_company(self, company_id: str) -> Optional[dict]:
+        """Resolve a company by internal id, canonical domain, or name."""
+        row = self.conn.execute(
+            "SELECT * FROM outreach_companies WHERE company_id=?", (company_id,)).fetchone()
+        if row:
+            return dict(row)
+        row = self.conn.execute(
+            "SELECT * FROM outreach_companies WHERE domain=? OR name=? LIMIT 1",
+            (company_id.strip().lower(), company_id)).fetchone()
+        return dict(row) if row else None
+
+    def list_contacts_joined(self) -> List[dict]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT c.*, o.name AS company_name, o.domain AS company_domain, o.state AS company_state "
+            "FROM contacts c LEFT JOIN outreach_companies o ON c.company_id=o.company_id "
+            "ORDER BY c.id DESC").fetchall()]
+
+    # -- outbound messages ---------------------------------------------------
+    def record_send(self, draft_id: Optional[int], contact_id: Optional[int],
+                    company_id: str, subject: str, body: str,
+                    gmail_thread_id: str = "", gmail_message_id: str = "",
+                    status: str = MSG_SENT) -> int:
+        """Record an outbound message with durable idempotency key.
+
+        If a message with the same draft_id already exists, returns the existing
+        row id without inserting (idempotent). """
+        if draft_id is not None:
+            existing = self.conn.execute(
+                "SELECT id FROM outbound_messages WHERE draft_id=?", (draft_id,)).fetchone()
+            if existing:
+                return existing["id"]
+        cur = self.conn.execute(
+            "INSERT INTO outbound_messages (draft_id,contact_id,company_id,gmail_thread_id,"
+            "message_id,subject,body,sent_at,status) VALUES (?,?,?,?,?,?,?,?,?)",
+            (draft_id, contact_id, company_id, gmail_thread_id, gmail_message_id,
+             subject, body, _now() if status == MSG_SENT else "", status))
+        self.conn.commit()
+        if gmail_thread_id:
+            self.upsert_thread(gmail_thread_id, company_id, contact_id, status="active")
+        return cur.lastrowid
+
+    def mark_message(self, message_id: int, status: str, thread_id: str = "") -> bool:
+        self.conn.execute(
+            "UPDATE outbound_messages SET status=? WHERE id=?", (status, message_id))
+        if thread_id:
+            self.conn.execute(
+                "UPDATE outbound_messages SET gmail_thread_id=? WHERE id=?",
+                (thread_id, message_id))
+        self.conn.commit()
+        return True
+
+    def sent_to(self, contact_id: int) -> List[dict]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT * FROM outbound_messages WHERE contact_id=? ORDER BY id DESC",
+            (contact_id,)).fetchall()]
+
+    # -- linkedin queue ------------------------------------------------------
+    def add_linkedin_task(self, company_id: str, contact_id: Optional[int],
+                          profile_url: str, connection_note: str = "",
+                          post_accept_msg: str = "", referral_request: str = "") -> int:
+        cur = self.conn.execute(
+            "INSERT INTO linkedin_tasks (company_id,contact_id,profile_url,connection_note,"
+            "post_accept_msg,referral_request,status,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (company_id, contact_id, profile_url, connection_note, post_accept_msg,
+             referral_request, "pending", _now()))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def set_linkedin_status(self, task_id: int, status: str, note: str = "") -> bool:
+        self.conn.execute(
+            "UPDATE linkedin_tasks SET status=?, last_action=?, updated_at=? WHERE id=?",
+            (status, note, _now(), task_id))
+        self.conn.commit()
+        return True
+
+    def list_linkedin_tasks(self) -> List[dict]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT * FROM linkedin_tasks ORDER BY id DESC").fetchall()]
+
+    # -- profile confirmations ----------------------------------------------
+    def confirm_profile(self, field: str, value: str, source: str = "user") -> bool:
+        self.conn.execute(
+            "INSERT INTO profile_confirmations (field,value,source,confirmed_at) VALUES (?,?,?,?) "
+            "ON CONFLICT(field) DO UPDATE SET value=excluded.value, source=excluded.source, "
+            "confirmed_at=excluded.confirmed_at", (field, value, source, _now()))
+        self.conn.commit()
+        return True
+
+    def list_profile_confirmations(self) -> dict:
+        return {r["field"]: r["value"] for r in self.conn.execute(
+            "SELECT field, value FROM profile_confirmations").fetchall()}
 
     # -- metrics -------------------------------------------------------------
     def metrics(self) -> dict:
