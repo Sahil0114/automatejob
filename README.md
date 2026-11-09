@@ -67,6 +67,19 @@ python -m automatejob <command> [options]
 
   stats / sources / companies
 
+  discover             run company discovery (YC directory + optional ATS)
+    --yc-pages N       cap YC directory pages (default: all)
+    --ats              detect + validate ATS boards for discovered companies
+    --ats-limit N      max companies to ATS-probe (bounded, default 30)
+
+  leads                show company shortlists from the discovery DB
+    --mumbai / --remote <india_remote|worldwide_remote>
+    --category <active_hiring|speculative_outreach|research_lead>
+
+  ats <name> [domain]  detect + validate a company's ATS board (live)
+
+  profile              show the verified candidate profile + unverified fields
+
 Global: -c/--config PATH, -v/-vv for logging
 ```
 
@@ -113,6 +126,38 @@ type, Mumbai-office status, remote hiring eligibility, last-checked timestamp,
 and the source of every claim. Unverified facts are stored as null/"unknown",
 never guessed. A company known to hire world-wide remote upgrades its bare
 "Remote" roles from needs_verification to confirmed.
+
+## Company discovery
+
+A separate company layer (`company.py`, `sources/company_sources.py`,
+`ats_detect.py`, `company_scoring.py`, `discovery.py`) discovers and enriches
+companies independently of the job pipeline:
+
+- **YC directory** (`api.ycombinator.com/v0.1/companies`, public, paginated) —
+  name, website, description, team size, batch, tags, locations.
+- **GitHub org** (`api.github.com/orgs/{org}`, public) — confirms engineering
+  activity and detects technologies from repository languages.
+- **ATS auto-detection** (`ats_detect.py`) — infers a Greenhouse/Lever/Ashby
+  board identifier, then **validates it against the live public endpoint**
+  (200 = verified, 404 = not this ATS). Inferred tokens are never trusted
+  unvalidated. (Wellfound has no stable public API — recorded as unsupported.)
+- **Company scoring** — three opportunity categories: `active_hiring`
+  (relevant verified opening), `speculative_outreach` (credible engineering /
+  funding / remote / Mumbai signals, no vacancy), `research_lead` (insufficient
+  evidence). Every claim carries source URLs; speculative is never presented
+  as a vacancy.
+
+Discovered companies are stored in `data/companies.db` (separate from
+`data/jobs.db`, both git-ignored) with provenance and unknown-value handling.
+
+## Candidate profile & answer bank
+
+`data/candidate_profile.toml` and `data/answer_bank.toml` hold the verified
+factual foundation (portfolio, technologies, target roles, location and
+employment preferences) plus reusable answer templates. Unverified fields
+(name, education, experience, work authorization, notice period, availability)
+are explicit and must be confirmed before use — `profile.py` refuses to render
+an answer that depends on an unconfirmed fact rather than inventing one.
 
 ## Tracking
 

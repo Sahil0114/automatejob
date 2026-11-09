@@ -6,7 +6,10 @@ import unittest
 from automatejob.config import (AppConfig, EligibilityConfig, LocationConfig,
                                 RoleConfig, ScoringConfig)
 from automatejob.models import Job
-from automatejob.qualification import classify_job
+from automatejob.qualification import (
+    CAT_ACTIONABLE, CAT_CLOSED, CAT_EXCLUDED, CAT_NEEDS_VERIFICATION,
+    CAT_RELOCATION, CAT_REVIEW, categorize, classify_job,
+)
 
 
 def make_config(relocation=True):
@@ -80,6 +83,22 @@ class TestActionableGate(unittest.TestCase):
         c = classify_job(job("Junior DevOps Engineer", "Remote", "remote"), make_config())
         self.assertFalse(c.actionable)
         self.assertEqual(c.eligibility, "needs_verification")
+
+
+class TestCategorize(unittest.TestCase):
+    def test_partition_is_non_overlapping_and_ordered(self):
+        # closed wins over everything.
+        self.assertEqual(categorize("closed", "confirmed", "remote", 1), CAT_CLOSED)
+        # excluded / needs_verification beat actionable.
+        self.assertEqual(categorize("open", "excluded", "", 0), CAT_EXCLUDED)
+        self.assertEqual(categorize("open", "needs_verification", "", 0), CAT_NEEDS_VERIFICATION)
+        # actionable beats relocation.
+        self.assertEqual(categorize("open", "confirmed", "remote", 1), CAT_ACTIONABLE)
+        # relocation before review.
+        self.assertEqual(categorize("open", "confirmed", "relocation", 0), CAT_RELOCATION)
+        # confirmed + mumbai/remote + not actionable -> review.
+        self.assertEqual(categorize("open", "confirmed", "mumbai", 0), CAT_REVIEW)
+        self.assertEqual(categorize("open", "confirmed", "remote", 0), CAT_REVIEW)
 
 
 if __name__ == "__main__":

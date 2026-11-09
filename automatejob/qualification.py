@@ -109,3 +109,32 @@ def classify_job(job: Job, config: AppConfig, registry=None) -> Classification:
 def is_actionable(job: Job, config: AppConfig, registry=None) -> bool:
     """Convenience wrapper returning just the boolean."""
     return classify_job(job, config, registry).actionable
+
+
+# Review-bucket categories: a single non-overlapping partition of every stored
+# record, so reports can account for ALL jobs (no gaps, no overlaps).
+CAT_ACTIONABLE = "actionable"
+CAT_RELOCATION = "relocation"
+CAT_REVIEW = "review"
+CAT_NEEDS_VERIFICATION = "needs_verification"
+CAT_EXCLUDED = "excluded"
+CAT_CLOSED = "closed"
+
+CATEGORIES = (CAT_ACTIONABLE, CAT_RELOCATION, CAT_REVIEW,
+              CAT_NEEDS_VERIFICATION, CAT_EXCLUDED, CAT_CLOSED)
+
+
+def categorize(status: str, eligibility: str, location_preference: str,
+               actionable: int) -> str:
+    """Assign exactly one review-bucket category (first match wins)."""
+    if status == "closed":
+        return CAT_CLOSED
+    if eligibility == "excluded":
+        return CAT_EXCLUDED
+    if eligibility == "needs_verification":
+        return CAT_NEEDS_VERIFICATION
+    if actionable == 1:
+        return CAT_ACTIONABLE
+    if location_preference == "relocation":
+        return CAT_RELOCATION
+    return CAT_REVIEW

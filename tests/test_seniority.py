@@ -30,6 +30,18 @@ class TestSeniority(unittest.TestCase):
         self.assertEqual(classify_seniority(
             job("Backend Engineer", description="1+ years experience")), JUNIOR)
 
+    def test_highest_experience_band_wins(self):
+        # "4+ years Go" primary + "2+ years TypeScript" secondary -> mid, NOT junior.
+        self.assertEqual(classify_seniority(
+            job("Software Engineer", description=(
+                "Required: 4+ years of professional Go experience. "
+                "Also required: 2+ years of TypeScript experience."))), INTERMEDIATE)
+
+    def test_six_plus_years_is_senior_even_with_junior_band(self):
+        self.assertEqual(classify_seniority(
+            job("Engineer", description="6+ years of Go. Nice to have: 1+ years of Python.")),
+            SENIOR)
+
     def test_intermediate(self):
         self.assertEqual(classify_seniority(job("Software Engineer II")), INTERMEDIATE)
         self.assertEqual(classify_seniority(

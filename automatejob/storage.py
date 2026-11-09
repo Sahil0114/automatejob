@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .models import Job
+from .qualification import categorize
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -242,6 +243,7 @@ class Storage:
         location_preference: Optional[str] = None,
         status: Optional[str] = "open",
         only_actionable: bool = False,
+        category: Optional[str] = None,
     ) -> List[dict]:
         """Return stored jobs, highest score first."""
         where = []
@@ -269,10 +271,18 @@ class Storage:
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY score DESC, last_seen_at DESC"
-        if limit is not None:
+        # Category filtering is computed in Python (derived field); drop the SQL
+        # LIMIT when filtering so we slice only after the category is applied.
+        if limit is not None and category is None:
             sql += f" LIMIT {int(limit)}"
-        rows = self.conn.execute(sql, params).fetchall()
-        return [dict(r) for r in rows]
+        rows = [dict(r) for r in self.conn.execute(sql, params).fetchall()]
+        if category is not None:
+            rows = [r for r in rows
+                    if categorize(r["status"], r["eligibility"],
+                                  r.get("location_preference") or "", r["actionable"]) == category]
+        if category is not None and limit is not None:
+            rows = rows[: int(limit)]
+        return rows
 
     def mark_seen(self, only_new: bool = True) -> int:
         """Clear the 'new' flag; returns number of rows updated."""
@@ -309,6 +319,15 @@ class Storage:
             "WHERE status = 'open' GROUP BY location_preference"
         ).fetchall()
         out["location_preference"] = {r["k"] or "unset": r["c"] for r in pref}
+        # Non-overlapping review-bucket categories that partition ALL records.
+        cats = {}
+        for r in self.conn.execute(
+            "SELECT status, eligibility, location_preference, actionable FROM jobs"
+        ).fetchall():
+            c = categorize(r["status"], r["eligibility"],
+                           r["location_preference"] or "", r["actionable"])
+            cats[c] = cats.get(c, 0) + 1
+        out["categories"] = cats
         return out
 
     def find_cross_board_duplicates(self) -> List[dict]:
@@ -350,6 +369,8 @@ class Storage:
                 "role_family": r["role_family"],
                 "seniority": r["seniority"],
                 "actionable": r["actionable"],
+                "category": categorize(r["status"], r["eligibility"],
+                                       r.get("location_preference") or "", r["actionable"]),
                 "score": r["score"],
                 "status": r["status"],
                 "url": r["url"],

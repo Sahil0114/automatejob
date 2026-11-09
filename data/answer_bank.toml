@@ -1,0 +1,41 @@
+# Recurring application-question answer bank.
+#
+# Each entry is a TEMPLATE. Placeholders use {{field}} syntax and draw only
+# from the verified candidate profile. Do NOT fill {{...}} with invented
+# facts — if a required field is unverified, the loader must raise/flag it
+# rather than fabricate an answer.
+
+[[answers]]
+question = "relevant_experience"
+label = "Tell us about your relevant experience"
+template = "{{experience_summary}}"
+
+[[answers]]
+question = "technologies_used"
+label = "Which technologies have you worked with?"
+template = "{{technologies}}"
+
+[[answers]]
+question = "why_role"
+label = "Why are you interested in this role?"
+template = "I'm targeting {{role_label}} roles and my background is {{technologies_short}}."
+
+[[answers]]
+question = "why_company"
+label = "Why are you interested in this company?"
+template = "{{company_insight}}"
+
+[[answers]]
+question = "notice_period"
+label = "What is your notice period / availability?"
+template = "{{availability}}"
+
+[[answers]]
+question = "location_flexibility"
+label = "Are you flexible on location?"
+template = "{{location_flexibility}}"
+
+[[answers]]
+question = "work_authorization"
+label = "What is your work authorization status?"
+template = "{{work_authorization}}"

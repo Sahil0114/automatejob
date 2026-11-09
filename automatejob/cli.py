@@ -13,7 +13,10 @@ from pathlib import Path
 
 from .collector import Collector
 from .companies import CompanyRegistry
+from .company import CompanyStorage
 from .config import AppConfig
+from .discovery import CompanyDiscovery
+from .profile import AnswerBank, CandidateProfile, UnverifiedField
 from .storage import Storage
 
 log = logging.getLogger("automatejob")
@@ -126,13 +129,14 @@ def cmd_collect(cfg: AppConfig, args) -> int:
             print()
 
         stats = storage.stats()
-        print("Breakdown (open jobs):")
-        print(f"  actionable:          {stats.get('actionable', 0)}")
-        print(f"  needs_verification:  {stats.get('eligibility', {}).get('needs_verification', 0)}")
-        print(f"  excluded:            {stats.get('eligibility', {}).get('excluded', 0)}")
-        pref = stats.get("location_preference", {})
-        print(f"  by preference:       mumbai={pref.get('mumbai', 0)} "
-              f"relocation={pref.get('relocation', 0)} remote={pref.get('remote', 0)}")
+        cats = stats.get("categories", {})
+        print("Review buckets (partition ALL records):")
+        print(f"  actionable:          {cats.get('actionable', 0)}")
+        print(f"  relocation:          {cats.get('relocation', 0)}")
+        print(f"  review:              {cats.get('review', 0)}")
+        print(f"  needs_verification:  {cats.get('needs_verification', 0)}")
+        print(f"  excluded:            {cats.get('excluded', 0)}")
+        print(f"  closed:              {cats.get('closed', 0)}")
         print(f"  total stored:        {stats['total']}")
         print()
 
@@ -167,6 +171,7 @@ def cmd_list(cfg: AppConfig, args) -> int:
             eligibility=args.eligibility,
             location_preference=args.preference,
             only_actionable=args.actionable,
+            category=args.category,
             status=None if args.all else "open",
         )
         if not rows:
@@ -237,12 +242,10 @@ def cmd_stats(cfg: AppConfig, args) -> int:
         print(f"  open:                {s['open']}")
         print(f"  closed:              {s['closed']}")
         print(f"  actionable (open):   {s.get('actionable', 0)}")
-        print("by eligibility (open):")
-        for k, v in sorted(s.get("eligibility", {}).items()):
-            print(f"  {k:22s} {v}")
-        print("by location preference (open):")
-        for k, v in sorted(s.get("location_preference", {}).items()):
-            print(f"  {k:22s} {v}")
+        print("review buckets (non-overlapping partition of ALL records):")
+        for k in ("actionable", "relocation", "review", "needs_verification",
+                  "excluded", "closed"):
+            print(f"  {k:20s} {s.get('categories', {}).get(k, 0)}")
         dups = storage.find_cross_board_duplicates()
         print(f"cross-board duplicate groups: {len(dups)}")
         return 0
@@ -344,6 +347,108 @@ def cmd_companies(cfg: AppConfig, args) -> int:
     return 0
 
 
+def _company_storage(cfg: AppConfig) -> CompanyStorage:
+    return CompanyStorage(cfg.companies_db_path)
+
+
+def _print_company(c: dict) -> None:
+    mumbai = {True: "yes", False: "no", None: "?"}[c["mumbai_office"]]
+    techs = ", ".join(json.loads(c["technologies"] or "[]")[:6])
+    print(f"{c['score']:5.1f} [{c['category'] or '-':20s}] {c['name']}")
+    print(f"        domain={c['domain']}  mumbai_office={mumbai}  remote={c['remote_policy']}")
+    if c.get("funding_stage") and c["funding_stage"] != "unknown":
+        print(f"        funding={c['funding_stage']}  size={c['company_size']}")
+    if techs:
+        print(f"        tech: {techs}")
+    if c.get("ats_type"):
+        print(f"        ATS: {c['ats_type']} (token={c['ats_token']})")
+    if c.get("website"):
+        print(f"        {c['website']}")
+    print()
+
+
+def cmd_discover(cfg: AppConfig, args) -> int:
+    cstore = _company_storage(cfg)
+    jobs = Storage(cfg.db_path)
+    try:
+        disc = CompanyDiscovery(cstore, jobs_storage=jobs)
+        total = disc.discover_yc(max_pages=args.yc_pages)
+        print(f"Discovered {total} YC companies.")
+        if args.ats:
+            relevant = [disc._row_to_company(r) for r in
+                        cstore.list(mumbai=True, limit=args.ats_limit)]
+            n = disc.detect_ats_for(relevant, limit=args.ats_limit)
+            print(f"ATS-detected + validated for {n} companies.")
+        scored = disc.score_all()
+        print(f"Scored {scored} companies.")
+        s = cstore.stats()
+        print(f"\nCompany DB totals:")
+        print(f"  total:                {s['total']}")
+        print(f"  mumbai_office:        {s['mumbai_office']}")
+        print(f"  india/worldwide rm:   {s['india_remote']}")
+        for cat, n in sorted(s.get("category", {}).items()):
+            print(f"  {cat:22s} {n}")
+        return 0
+    finally:
+        jobs.close()
+        cstore.close()
+
+
+def cmd_leads(cfg: AppConfig, args) -> int:
+    cstore = _company_storage(cfg)
+    try:
+        if args.mumbai:
+            rows = cstore.list(mumbai=True, limit=args.limit)
+            label = "Mumbai-office companies"
+        elif args.remote:
+            rows = cstore.list(remote=args.remote, limit=args.limit)
+            label = f"remote={args.remote} companies"
+        elif args.category:
+            rows = cstore.list(category=args.category, limit=args.limit)
+            label = f"category={args.category} companies"
+        else:
+            rows = cstore.list(limit=args.limit)
+            label = "top companies"
+        if not rows:
+            print(f"No {label} found.")
+            return 0
+        print(f"{label} ({len(rows)}):\n")
+        for r in rows:
+            _print_company(r)
+        return 0
+    finally:
+        cstore.close()
+
+
+def cmd_ats(cfg: AppConfig, args) -> int:
+    from .ats_detect import detect_ats
+    ats, token, url = detect_ats(args.name, args.domain or "", args.careers or "")
+    if ats:
+        print(f"{args.name}: {ats} (token={token})")
+        print(f"  validated board: {url}")
+    else:
+        print(f"{args.name}: no verified ATS board found.")
+    return 0
+
+
+def cmd_profile(cfg: AppConfig, args) -> int:
+    prof = CandidateProfile(args.path)
+    print("Candidate profile (verified facts):")
+    print(f"  portfolio:  {prof.portfolio or '(unset)'}")
+    print(f"  tech:       {', '.join(prof.technologies[:8])}...")
+    print(f"  roles:      {', '.join(r['label'] for r in prof.target_roles)}")
+    missing = prof.unverified_fields()
+    print(f"\nUnverified fields needing confirmation ({len(missing)}):")
+    for m in missing:
+        print(f"  - {m}")
+    if args.bank:
+        bank = AnswerBank(args.bank)
+        print(f"\nAnswer bank questions ({len(bank.questions())}):")
+        for q in bank.questions():
+            print(f"  - {q}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="automatejob",
@@ -370,6 +475,9 @@ def build_parser() -> argparse.ArgumentParser:
     pl.add_argument("--preference", type=str, default=None, choices=[
         "mumbai", "relocation", "remote"],
         help="filter by location preference")
+    pl.add_argument("--category", type=str, default=None, choices=[
+        "actionable", "relocation", "review", "needs_verification", "excluded", "closed"],
+        help="filter by review-bucket category (non-overlapping)")
     pl.add_argument("--min-score", type=float, default=None)
     pl.add_argument("--limit", type=int, default=None)
     pl.add_argument("--source", type=str, default=None,
@@ -403,6 +511,35 @@ def build_parser() -> argparse.ArgumentParser:
 
     pco = sub.add_parser("companies", help="list the company registry")
     pco.set_defaults(func=cmd_companies)
+
+    pd = sub.add_parser("discover", help="run company discovery (YC directory + optional ATS)")
+    pd.add_argument("--yc-pages", type=int, default=None,
+                    help="cap YC directory pages to fetch (default: all)")
+    pd.add_argument("--ats", action="store_true",
+                    help="detect + validate ATS boards for discovered companies")
+    pd.add_argument("--ats-limit", type=int, default=30,
+                    help="max companies to ATS-probe (bounded)")
+    pd.set_defaults(func=cmd_discover)
+
+    pl = sub.add_parser("leads", help="show company shortlists from the discovery DB")
+    pl.add_argument("--mumbai", action="store_true", help="Mumbai-office companies")
+    pl.add_argument("--remote", type=str, default=None,
+                    choices=["india_remote", "worldwide_remote"])
+    pl.add_argument("--category", type=str, default=None,
+                    choices=["active_hiring", "speculative_outreach", "research_lead"])
+    pl.add_argument("--limit", type=int, default=30)
+    pl.set_defaults(func=cmd_leads)
+
+    pa = sub.add_parser("ats", help="detect + validate a company's ATS board")
+    pa.add_argument("name")
+    pa.add_argument("domain", nargs="?", default="")
+    pa.add_argument("--careers", default="")
+    pa.set_defaults(func=cmd_ats)
+
+    pp = sub.add_parser("profile", help="show the verified candidate profile")
+    pp.add_argument("--path", default="data/candidate_profile.toml")
+    pp.add_argument("--bank", default=None, help="path to answer_bank.toml")
+    pp.set_defaults(func=cmd_profile)
 
     return p
 

@@ -1,0 +1,108 @@
+# Verified candidate profile — used as the factual foundation for future
+# outreach and applications.
+#
+# RULE: only verified facts live here. Any field marked `unverified` or left
+# as a `CONFIRM:` placeholder must be confirmed by the user before it is ever
+# used in an application or outreach message. Never invent education,
+# employment, dates, or work authorization.
+
+name = "unverified"                    # CONFIRM: full legal name
+
+# Verified technologies (from the candidate's stated experience).
+technologies = [
+  "Go", "Python", "Kubernetes", "Docker", "Terraform", "Linux",
+  "PostgreSQL", "MySQL", "MongoDB", "Redis",
+  "Infrastructure automation", "Database discovery and monitoring",
+  "API security and authorization", "Backend API development",
+]
+
+# Projects / portfolio entries (verified only).
+projects = []
+
+# Resume variants (paths to stored documents; none populated yet).
+resume_variants = []
+
+communication_style = "Short, natural, conversational and specific. Cold emails: concise bullet points, relevant experience first, one genuine company-specific insight, one realistic way to add value, portfolio link."
+
+[contact]
+email = "unverified"                   # CONFIRM
+portfolio = "https://opsbysahil.site"  # verified (provided)
+
+[education]
+summary = "unverified"                 # CONFIRM: degree, institution, dates
+details = []
+
+[experience]
+# CONFIRM: each entry needs employer, title, dates, and verifiable bullet points.
+entries = []
+
+# Employment preferences (verified defaults only; confirm each before use).
+[employment]
+seniority = ["intern", "new grad", "fresher", "trainee", "entry-level", "junior", "0-2 years"]
+work_authorization = "unverified"      # CONFIRM: India work authorization / sponsorship needs
+notice_period = "unverified"           # CONFIRM
+availability = "unverified"            # CONFIRM
+
+# Verified target roles (from the candidate's stated target profile).
+[[target_roles]]
+key = "junior_devops"
+label = "Junior DevOps Engineer"
+keywords = ["devops", "ci/cd", "infrastructure", "kubernetes", "docker", "terraform"]
+
+[[target_roles]]
+key = "junior_cloud"
+label = "Junior Cloud Engineer"
+keywords = ["cloud", "aws", "azure", "gcp", "serverless"]
+
+[[target_roles]]
+key = "infra_platform"
+label = "Infrastructure / Platform Engineer"
+keywords = ["infrastructure", "platform", "systems", "reliability"]
+
+[[target_roles]]
+key = "junior_sre"
+label = "Junior SRE"
+keywords = ["sre", "site reliability", "observability"]
+
+[[target_roles]]
+key = "go_backend"
+label = "Go Backend Engineer"
+keywords = ["go", "golang", "backend", "api", "microservices"]
+
+[[target_roles]]
+key = "python_backend"
+label = "Python Backend Engineer"
+keywords = ["python", "backend", "api", "django", "fastapi"]
+
+[[target_roles]]
+key = "new_grad"
+label = "Software Engineer, New Graduate"
+keywords = ["software engineer", "new grad", "graduate"]
+
+[[target_roles]]
+key = "ai_automation"
+label = "AI Automation / AI Agents Engineer"
+keywords = ["ai", "llm", "agents", "automation", "ml"]
+
+[[target_roles]]
+key = "qa_automation"
+label = "QA Automation Engineer"
+keywords = ["qa", "test automation", "sdet"]
+
+[[target_roles]]
+key = "internship"
+label = "Engineering Internship"
+keywords = ["intern", "internship", "co-op"]
+
+# Verified location preferences.
+[[location_preferences]]
+rank = 1
+label = "Mumbai / Thane / Navi Mumbai (onsite or hybrid)"
+
+[[location_preferences]]
+rank = 2
+label = "India-eligible remote"
+
+[[location_preferences]]
+rank = 3
+label = "Worldwide remote explicitly available to India-based candidates"

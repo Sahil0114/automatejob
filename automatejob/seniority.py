@@ -140,17 +140,15 @@ def classify_seniority(job: Job) -> str:
     if has_intermediate:
         return INTERMEDIATE
 
-    # Experience-band-based calls.
-    if junior_exp:
-        return JUNIOR
-    if intermediate_exp and not senior_exp:
-        return INTERMEDIATE
+    # Experience-band-based calls: the HIGHEST band wins. A JD listing
+    # "4+ years of Go" alongside "2+ years of TypeScript" is mid/senior, not
+    # junior — the junior band must not override a higher primary requirement.
     if senior_exp:
         return SENIOR
-
-    # Borderline: intermediate/senior experience overlap -> review.
-    if intermediate_exp and senior_exp:
-        return REVIEW
+    if intermediate_exp:
+        return INTERMEDIATE
+    if junior_exp:
+        return JUNIOR
 
     # Level-coded "Engineer 3" / "Engineer II" that isn't caught above.
     m = _LEVEL_CODE.search(title)

@@ -71,6 +71,7 @@ class AppConfig:
     eligibility: EligibilityConfig
     db_path: str = "data/jobs.db"
     companies_path: str = "data/companies.toml"
+    companies_db_path: str = "data/companies.db"
     reports_dir: str = "reports"
     min_score: float = 40.0
     list_limit: int = 20
@@ -130,6 +131,7 @@ class AppConfig:
             eligibility=eligibility,
             db_path=database.get("path", "data/jobs.db"),
             companies_path=raw.get("companies", {}).get("path", "data/companies.toml"),
+            companies_db_path=raw.get("companies", {}).get("db", "data/companies.db"),
             reports_dir=raw.get("report", {}).get("dir", "reports"),
             min_score=float(collect.get("min_score", 40.0)),
             list_limit=int(collect.get("list_limit", 20)),
