@@ -1,0 +1,38 @@
+# Local database — user data, never committed.
+# (data/companies.toml is source data and IS tracked; see the negations below.)
+data/*.db
+data/*.db-wal
+data/*.db-shm
+*.db
+*.db-wal
+*.db-shm
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# secrets — never commit
+.env
+.env.*
+*.key
+*.pem
+*.p12
+secrets*

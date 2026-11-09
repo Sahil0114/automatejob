@@ -1,0 +1,187 @@
+# Personal AI-powered job hunting configuration.
+#
+# All sources below are PUBLIC job-board feeds exposed by Greenhouse and Lever
+# for third-party job boards (no login, no scraping of gated pages). Add or
+# remove entries freely. `name` is the display company (used when the source
+# does not return one).
+
+[database]
+path = "data/jobs.db"
+
+[collect]
+min_score = 40        # default highlight threshold for `collect`
+list_limit = 20       # max newly discovered jobs shown per collect run
+
+# ---- job sources ----------------------------------------------------------
+
+[[sources]]
+type = "greenhouse"
+token = "vercel"
+name = "Vercel"
+
+[[sources]]
+type = "greenhouse"
+token = "cloudflare"
+name = "Cloudflare"
+
+[[sources]]
+type = "greenhouse"
+token = "databricks"
+name = "Databricks"
+
+[[sources]]
+type = "greenhouse"
+token = "mongodb"
+name = "MongoDB"
+
+[[sources]]
+type = "greenhouse"
+token = "gitlab"
+name = "GitLab"
+
+[[sources]]
+type = "greenhouse"
+token = "stripe"
+name = "Stripe"
+
+[[sources]]
+type = "greenhouse"
+token = "anthropic"
+name = "Anthropic"
+
+[[sources]]
+type = "greenhouse"
+token = "figma"
+name = "Figma"
+
+[[sources]]
+type = "greenhouse"
+token = "twilio"
+name = "Twilio"
+
+[[sources]]
+type = "greenhouse"
+token = "datadog"
+name = "Datadog"
+
+[[sources]]
+type = "lever"
+token = "spotify"
+name = "Spotify"
+
+[[sources]]
+type = "lever"
+token = "palantir"
+name = "Palantir"
+
+[[sources]]
+type = "ashby"
+token = "kong"
+name = "Kong"
+
+[[sources]]
+type = "ashby"
+token = "supabase"
+name = "Supabase"
+
+[[sources]]
+type = "ashby"
+token = "notion"
+name = "Notion"
+
+# ---- target roles ---------------------------------------------------------
+# A role's keywords are matched against the job title (and description where
+# the source provides one). Short keywords (<=3 chars) are word-boundary
+# matched to avoid false hits ("go", "ai", "ml").
+
+[[roles]]
+key = "devops"
+label = "Junior DevOps / SRE / Infra"
+keywords = [
+  "devops", "site reliability", "sre", "infrastructure", "platform engineer",
+  "cloud engineer", "systems engineer", "release engineer",
+  "production engineer", "observability", "build engineer", "deployment engineer",
+]
+
+[[roles]]
+key = "cloud"
+label = "Cloud Engineering"
+keywords = [
+  "cloud", "aws", "azure", "gcp", "google cloud", "kubernetes", "k8s",
+  "terraform", "serverless", "cloud infrastructure", "cloud platform",
+]
+
+[[roles]]
+key = "go_backend"
+label = "Go Backend Engineering"
+keywords = [
+  "go", "golang", "backend", "back-end", "backend engineer", "api",
+  "microservices", "grpc", "distributed systems", "software engineer",
+  "software engineering",
+]
+
+[[roles]]
+key = "ai_automation"
+label = "AI / Automation Engineering"
+keywords = [
+  "ai", "artificial intelligence", "machine learning", "ml", "llm",
+  "large language", "automation", "agent", "agents", "rag", "nlp",
+  "ai engineer", "ml engineer", "data engineer", "generative",
+]
+
+# ---- target locations (ordered: first match wins) -------------------------
+
+[[locations]]
+key = "mumbai"
+label = "Mumbai"
+keywords = ["mumbai", "maharashtra"]
+points = 35
+
+[[locations]]
+key = "india"
+label = "India"
+keywords = [
+  "india", "bengaluru", "bangalore", "delhi", "new delhi", "pune",
+  "hyderabad", "gurgaon", "gurugram", "chennai", "noida",
+]
+points = 30
+
+# ---- hard eligibility filter (applied BEFORE scoring) ---------------------
+
+[eligibility]
+# On-site/hybrid cities the user will work in (Mumbai metro, incl. relocation).
+cities = ["mumbai", "thane", "navi mumbai", "new bombay"]
+# Accept on-site/hybrid roles anywhere in India.
+india_wide = true
+# Keep unresolved locations for review instead of excluding outright.
+relocation = true
+
+# ---- change/closure tracking ----------------------------------------------
+
+[tracking]
+# A role is marked closed only after it is absent from this many successive
+# successful scans of its source.
+close_after_scans = 2
+
+# ---- companies registry ----------------------------------------------------
+
+[companies]
+path = "data/companies.toml"
+
+# ---- scoring weights ------------------------------------------------------
+
+[scoring]
+role_max = 40
+role_base = 18                 # points once a role keyword hits the title
+role_per_title = 4             # per additional distinct title keyword
+role_per_desc = 2              # per description-only keyword
+location_max = 35
+remote_open_points = 15        # "remote", region-unrestricted
+remote_restricted_penalty = -15  # "remote" but named to another country
+remote_india_bonus = 4         # extra when remote AND India-eligible
+seniority_max = 15
+internship_max = 10
+junior_bonus = 15
+senior_penalty = -15
+neutral_bonus = 8              # no seniority marker -> junior-eligible
+irrelevant_cap = 20            # ceiling for roles with no target match

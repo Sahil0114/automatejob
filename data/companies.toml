@@ -1,0 +1,124 @@
+# Normalized companies registry.
+#
+# Every company row records: name, website, careers URL, ATS type, Mumbai
+# office status, remote hiring eligibility, last-checked date, and the source
+# of each claim. Facts marked `null` / "unknown" / "" are UNVERIFIED — we do
+# not guess.
+#
+# The three Ashby boards were verified against the live public API on
+# 2026-11-09; their location/eligibility facts were read from the returned
+# postings (e.g. Kong lists "Staff Solutions Engineer- Mumbai, Mumbai, India";
+# Supabase lists 40 "Remote, Global" roles). The Greenhouse/Lever companies
+# ship with only structural facts (ATS type + board URL) filled in — their
+# Mumbai-office and remote-eligibility fields remain unverified until checked.
+
+[[companies]]
+name = "Kong"
+website = "https://konghq.com"
+careers_url = "https://jobs.ashbyhq.com/kong"
+ats_type = "ashby"
+mumbai_office = true
+remote_eligibility = "india_office"
+last_checked = "2026-11-09"
+sources = [
+    "https://api.ashbyhq.com/posting-api/job-board/kong",
+    "https://jobs.ashbyhq.com/kong",
+]
+
+[[companies]]
+name = "Supabase"
+website = "https://supabase.com"
+careers_url = "https://jobs.ashbyhq.com/supabase"
+ats_type = "ashby"
+mumbai_office = false
+remote_eligibility = "worldwide_remote"
+last_checked = "2026-11-09"
+sources = [
+    "https://api.ashbyhq.com/posting-api/job-board/supabase",
+    "https://jobs.ashbyhq.com/supabase",
+]
+
+[[companies]]
+name = "Notion"
+website = "https://notion.so"
+careers_url = "https://jobs.ashbyhq.com/notion"
+ats_type = "ashby"
+mumbai_office = false
+remote_eligibility = "india_office"
+last_checked = "2026-11-09"
+sources = [
+    "https://api.ashbyhq.com/posting-api/job-board/notion",
+    "https://jobs.ashbyhq.com/notion",
+]
+
+[[companies]]
+name = "Vercel"
+website = "https://vercel.com"
+careers_url = "https://boards.greenhouse.io/vercel"
+ats_type = "greenhouse"
+
+[[companies]]
+name = "Cloudflare"
+website = "https://cloudflare.com"
+careers_url = "https://boards.greenhouse.io/cloudflare"
+ats_type = "greenhouse"
+
+[[companies]]
+name = "Databricks"
+website = "https://databricks.com"
+careers_url = "https://boards.greenhouse.io/databricks"
+ats_type = "greenhouse"
+
+[[companies]]
+name = "MongoDB"
+website = "https://mongodb.com"
+careers_url = "https://boards.greenhouse.io/mongodb"
+ats_type = "greenhouse"
+
+[[companies]]
+name = "GitLab"
+website = "https://gitlab.com"
+careers_url = "https://boards.greenhouse.io/gitlab"
+ats_type = "greenhouse"
+
+[[companies]]
+name = "Stripe"
+website = "https://stripe.com"
+careers_url = "https://boards.greenhouse.io/stripe"
+ats_type = "greenhouse"
+
+[[companies]]
+name = "Anthropic"
+website = "https://anthropic.com"
+careers_url = "https://boards.greenhouse.io/anthropic"
+ats_type = "greenhouse"
+
+[[companies]]
+name = "Figma"
+website = "https://figma.com"
+careers_url = "https://boards.greenhouse.io/figma"
+ats_type = "greenhouse"
+
+[[companies]]
+name = "Twilio"
+website = "https://twilio.com"
+careers_url = "https://boards.greenhouse.io/twilio"
+ats_type = "greenhouse"
+
+[[companies]]
+name = "Datadog"
+website = "https://datadoghq.com"
+careers_url = "https://boards.greenhouse.io/datadog"
+ats_type = "greenhouse"
+
+[[companies]]
+name = "Spotify"
+website = "https://spotify.com"
+careers_url = "https://jobs.lever.co/spotify"
+ats_type = "lever"
+
+[[companies]]
+name = "Palantir"
+website = "https://palantir.com"
+careers_url = "https://jobs.lever.co/palantir"
+ats_type = "lever"
