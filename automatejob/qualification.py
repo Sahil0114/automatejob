@@ -92,6 +92,14 @@ def classify_job(job: Job, config: AppConfig, registry=None) -> Classification:
     else:
         fails.append(f"location preference '{elig.preference or 'none'}' not acceptable")
 
+    # Gate 5: freshness. A listing that is stale or needs re-verification is
+    # never actionable, even if its URL still responds.
+    freshness = getattr(job, "freshness", "fresh") or "fresh"
+    if freshness in ("stale", "needs_verification"):
+        fails.append(f"freshness: {freshness} (needs re-verification)")
+    else:
+        reasons.append("freshness: fresh")
+
     actionable = not fails
     reasons = reasons + (["gates passed"] if actionable else fails)
     job.actionable = 1 if actionable else 0

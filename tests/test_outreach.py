@@ -69,6 +69,14 @@ class TestOutreachStorage(unittest.TestCase):
         drafts = self.s.list_drafts(state="approved")
         self.assertEqual(len(drafts), 1)
 
+    def test_draft_can_be_edited_before_sending(self):
+        self.s.upsert_company("c1", "Acme", "acme.com", "high_signal", 50, [])
+        did = self.s.create_draft("c1", "vacancy", "Old subject", "Old body", {})
+        self.assertTrue(self.s.update_draft(did, "New subject", "New body"))
+        row = self.s.list_drafts()[0]
+        self.assertEqual(row["subject"], "New subject")
+        self.assertEqual(row["body"], "New body")
+
 
 if __name__ == "__main__":
     unittest.main()

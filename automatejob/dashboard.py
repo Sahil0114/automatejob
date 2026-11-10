@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import threading
 import time
 from http.cookies import SimpleCookie
@@ -150,6 +151,80 @@ class Dashboard:
             return []
         return self.companies_store.list(limit=limit)
 
+    def _company_research(self, limit=30) -> list:
+        """Research-ready company cards sourced only from stored evidence."""
+        rows = self.outreach.conn.execute(
+            "SELECT * FROM outreach_companies ORDER BY score DESC, name LIMIT ?", (limit,)).fetchall()
+        contacts = self.outreach.list_contacts_joined()
+        applications = self.outreach.list_applications()
+        out = []
+        for row in rows:
+            company = dict(row)
+            cid = company["company_id"]
+            company["evidence"] = self.outreach.list_evidence(cid)
+            company["contacts"] = [c for c in contacts if c["company_id"] == cid]
+            company["jobs"] = []
+            if self.jobs_store is not None:
+                company["jobs"] = [dict(j) for j in self.jobs_store.conn.execute(
+                    "SELECT id,title,location,url,seniority,actionable,freshness,freshness_note,status "
+                    "FROM jobs WHERE lower(company)=lower(?) AND status='open' "
+                    "ORDER BY actionable DESC, score DESC LIMIT 5", (company["name"],)).fetchall()]
+            existing = next((a for a in applications if a["company_id"] == cid), None)
+            if existing:
+                company["suggested_next_action"] = (
+                    f"Existing application ({existing['role']} on {existing['applied_at']}); "
+                    "review a follow-up, do not reapply.")
+            elif any(j["freshness"] != "fresh" for j in company["jobs"]):
+                company["suggested_next_action"] = "Verify the employer career source before outreach about this role."
+            elif company["contacts"]:
+                company["suggested_next_action"] = "Add or verify a professional email, then generate a reviewable draft."
+            else:
+                company["suggested_next_action"] = "Identify a suitable public contact or add one manually; no email is assumed."
+            out.append(company)
+        return out
+
+    def _jobs(self, limit=40) -> list:
+        """Relevant open jobs with freshness + application status."""
+        if self.jobs_store is None:
+            return []
+        rows = self.jobs_store.conn.execute(
+            "SELECT id,title,company,location,url,seniority,eligibility,actionable,"
+            "freshness,freshness_note,location_preference,status FROM jobs "
+            "WHERE status='open' AND (actionable=1 "
+            "OR freshness IN ('stale','needs_verification') "
+            "OR (eligibility='confirmed' AND seniority IN ('junior','internship','review') "
+            "AND role_family NOT IN ('non_engineering','review'))) "
+            "ORDER BY actionable DESC, score DESC LIMIT ?", (limit,)).fetchall()
+        apps = self.outreach.list_applications()
+        def application_company_key(value: str) -> str:
+            # HN displays e.g. "MixRank (YC S11)" while the official board
+            # uses "MixRank". Treat this provenance suffix as the same employer.
+            value = re.sub(r"\s*\(yc\s+[a-z]\d+\)\s*$", "", value or "", flags=re.I)
+            return re.sub(r"[^a-z0-9]+", "", value.lower())
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["applied"] = None
+            job_key = application_company_key(d["company"])
+            for a in apps:
+                if (application_company_key(a["company_name"]) == job_key
+                        or application_company_key(a["company_id"]) == job_key):
+                    d["applied"] = a["status"]
+                    break
+            out.append(d)
+        return out
+
+    def _verify_job(self, handler):
+        body = self._body(handler)
+        url = body.get("url", "")
+        status = body.get("status", "")
+        note = body.get("note", "")
+        if not url or status not in ("fresh", "needs_verification", "stale"):
+            self._send(handler, {"error": "bad request"}, 400)
+            return
+        n = self.jobs_store.set_freshness(url, status, note)
+        self._send(handler, {"ok": n > 0, "updated": n})
+
     # -- JSON API ------------------------------------------------------------
     def route(self, handler):
         path = urlparse(handler.path).path
@@ -179,7 +254,7 @@ class Dashboard:
         if path == "/api/overview":
             self._send(handler, self.outreach.metrics())
         elif path == "/api/companies":
-            self._send(handler, self._companies())
+            self._send(handler, self._company_research())
         elif path == "/api/contacts" and method == "GET":
             self._send(handler, self.outreach.list_contacts_joined())
         elif path == "/api/contacts" and method == "POST":
@@ -200,6 +275,10 @@ class Dashboard:
             self._send(handler, self._activity())
         elif path == "/api/applications":
             self._send(handler, self.outreach.list_applications())
+        elif path == "/api/jobs":
+            self._send(handler, self._jobs())
+        elif path == "/api/jobs/verify" and method == "POST":
+            self._verify_job(handler)
         elif path == "/api/linkedin":
             self._send(handler, self.outreach.list_linkedin_tasks())
         elif path.startswith("/api/linkedin/") and method == "POST":
@@ -235,7 +314,20 @@ class Dashboard:
             body.get("role_kind", ""), body.get("email", ""),
             email_status=body.get("email_status", "unverified"),
             linkedin_url=body.get("linkedin_url", ""), source_url=body.get("source_url", ""))
+        draft_id = None
+        created = False
+        if result.draft.get("subject") and result.draft.get("body"):
+            contact = self.outreach.conn.execute(
+                "SELECT company_id FROM contacts WHERE id=?", (result.contact_id,)).fetchone()
+            if contact is not None:
+                draft_id, created = self.outreach.ensure_draft(
+                    contact["company_id"],
+                    result.draft.get("evidence_map", {}).get("draft_type", "referral"),
+                    result.draft["subject"], result.draft["body"],
+                    result.draft.get("evidence_map", {}), contact_id=result.contact_id)
         self._send(handler, {"contact_id": result.contact_id, "draft": result.draft,
+                             "draft_id": draft_id, "draft_created": created,
+                             "draft_already_exists": draft_id is not None and not created,
                              "warnings": result.warnings})
 
     def _import_contacts(self, handler):
@@ -274,17 +366,28 @@ class Dashboard:
                              "warnings": r.warnings})
 
     def _draft_action(self, handler, path):
+        parts = path.strip("/").split("/")
+        # /api/drafts/<numeric-id>/<action>
+        if len(parts) != 4 or parts[:2] != ["api", "drafts"]:
+            self._send(handler, {"error": "bad draft action path"}, 400)
+            return
         try:
-            draft_id = int(path.rsplit("/", 1)[1])
+            draft_id = int(parts[2])
         except ValueError:
             self._send(handler, {"error": "bad id"}, 400)
             return
-        action = path.rsplit("/", 2)[-2] if "/" in path[:-1] else ""
-        # action is the second-to-last segment e.g. /api/drafts/12/approve
-        action = path.split("/")[-1]
+        action = parts[3]
         body = self._body(handler)
 
-        if action == "approve":
+        if action == "edit":
+            subject = str(body.get("subject", "")).strip()
+            draft_body = str(body.get("body", ""))
+            if not subject or not draft_body:
+                self._send(handler, {"ok": False, "error": "subject and body are required"}, 400)
+                return
+            ok = self.outreach.update_draft(draft_id, subject, draft_body)
+            self._send(handler, {"ok": ok}, 200 if ok else 409)
+        elif action == "approve":
             ok = self.outreach.approve_draft(draft_id)
             self._send(handler, {"ok": ok}, 200 if ok else 404)
         elif action == "reject":
@@ -298,16 +401,28 @@ class Dashboard:
             if row is None:
                 self._send(handler, {"error": "not found"}, 404)
                 return
+            # Durable idempotency: never create a second Gmail draft after a
+            # click/retry if one is already stored locally.
+            if row["gmail_draft_id"]:
+                self._send(handler, {"status": "gmail_draft", "draft_id": row["gmail_draft_id"],
+                                     "message_id": row["gmail_message_id"],
+                                     "thread_id": row["gmail_thread_id"],
+                                     "already_exists": True})
+                return
             if self.gmail is None:
                 self._send(handler, {"status": "gmail_unavailable"}, 200)
                 return
             contact = self.outreach.conn.execute(
                 "SELECT email FROM contacts WHERE id=?", (row["contact_id"],)).fetchone()
             to_addr = contact["email"] if contact else ""
-            res = self.gmail.save_draft(row["subject"], row["body"], to_addr)
-            self.outreach.conn.execute(
-                "UPDATE outreach_drafts SET state='gmail_draft' WHERE id=?", (draft_id,))
-            self.outreach.conn.commit()
+            res = self.gmail.save_draft(row["subject"], row["body"], to_addr,
+                                        thread_id=row["gmail_thread_id"])
+            if res.get("status") == "gmail_draft":
+                saved = self.outreach.record_gmail_draft(
+                    draft_id, res.get("draft_id", ""), res.get("message_id", ""),
+                    res.get("thread_id", ""), to_addr)
+                res["already_exists"] = False
+                res["recipient"] = saved["recipient"]
             self._send(handler, res)
         elif action == "mark_sent":
             # Copy-email workflow: user sent manually, record actual timestamp.
@@ -395,10 +510,10 @@ function metric(o){{return Object.entries(o||{{}}).map(([k,v])=>'<div class="met
 async function show(t){{
 document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('on',b.dataset.t===t));
 const v=$('#view');
-if(t==='jobs'){{const d=await get('/api/overview');v.innerHTML='<h2>Overview</h2>'+metric(d)}}
-else if(t==='companies'){{const d=await get('/api/companies');v.innerHTML='<h2>Companies ('+(d.length)+')</h2>'+d.map(c=>'<div class="card">'+tag(c.qualification)+'<b>'+esc(c.name)+'</b> <span class="small">'+esc(c.domain)+'</span><div class="small">score '+Math.round(c.score||0)+'</div></div>').join('')}}
-else if(t==='contacts'){{const d=await get('/api/contacts');v.innerHTML='<h2>Contacts ('+(d.length)+')</h2>'+d.map(c=>'<div class="card">'+tag(c.email_status)+'<b>'+esc(c.full_name)+'</b> <span class="small">'+esc(c.title)+'</span><div class="small">'+esc(c.company_name||'')+' · '+esc(c.email)+'</div></div>').join('')+addContactForm()}}
-else if(t==='drafts'){{const d=await get('/api/drafts');v.innerHTML='<h2>Drafts ('+(d.length)+')</h2>'+d.map(x=>'<div class="card"><span class="small">#'+x.id+'</span> '+tag(x.state)+' '+tag(x.draft_type)+'<b>'+esc(x.subject)+'</b><pre>'+esc(x.body)+'</pre><button onclick="act('+x.id+',\'approve\')">Approve</button><button class="dim" onclick="act('+x.id+',\'save_gmail\')">Save Gmail draft</button><button class="dim" onclick="act('+x.id+',\'send\')">Send…</button><button class="dim" onclick="act('+x.id+',\'mark_sent\')">Mark sent manually</button><button class="danger" onclick="act('+x.id+',\'reject\')">Reject</button></div>').join('')}}
+if(t==='jobs'){{const d=await get('/api/jobs');v.innerHTML='<h2>Relevant jobs ('+(d.length)+')</h2>'+d.map(j=>'<div class="card">'+tag(j.freshness==='fresh'?'active':j.freshness)+'<b>'+esc(j.title)+'</b> <span class="small">'+esc(j.company)+'</span><div class="small">'+esc(j.location)+' · '+esc(j.seniority)+' · '+esc(j.location_preference)+(j.applied?' · <b>applied: '+esc(j.applied)+'</b>':'')+'</div><a href="'+esc(j.url)+'" target="_blank">'+esc(j.url)+'</a>'+(j.freshness!=='fresh'?'<div class="small">⚠ '+esc(j.freshness)+': '+esc(j.freshness_note)+'</div>':'')+'<button class="dim" onclick="verifyJob(\\''+esc(j.url)+'\\',\\'fresh\\')">Mark fresh</button><button class="dim" onclick="verifyJob(\\''+esc(j.url)+'\\',\\'needs_verification\\')">Needs verification</button><button class="danger" onclick="verifyJob(\\''+esc(j.url)+'\\',\\'stale\\')">Stale</button></div>').join('')}}
+else if(t==='companies'){{const d=await get('/api/companies');v.innerHTML='<h2>Companies ('+(d.length)+')</h2>'+d.map(c=>'<div class="card">'+tag(c.qualification)+'<b>'+esc(c.name)+'</b> <span class="small">'+esc(c.domain)+'</span><div class="small">'+esc(c.state)+' · score '+Math.round(c.score||0)+'</div><div class="small"><b>Next:</b> '+esc(c.suggested_next_action)+'</div><h3>Research evidence</h3>'+((c.evidence||[]).map(e=>'<div class="small">'+tag(e.kind)+' '+esc(e.fact)+' <a href="'+esc(e.url)+'" target="_blank">source</a> · '+esc(e.observed_at)+'</div>').join('')||'<div class="small">No sourced evidence yet.</div>')+'<h3>Current vacancies</h3>'+((c.jobs||[]).map(j=>'<div class="small">'+tag(j.freshness)+'<a href="'+esc(j.url)+'" target="_blank">'+esc(j.title)+'</a> · '+esc(j.location)+' · '+esc(j.seniority)+(j.actionable?' · actionable':'')+'</div>').join('')||'<div class="small">No matching stored open role.</div>')+'<h3>Contacts</h3>'+((c.contacts||[]).map(x=>'<div class="small">'+tag(x.email_status)+'<b>'+esc(x.full_name)+'</b> · '+esc(x.title)+' '+(x.linkedin_url?'<a href="'+esc(x.linkedin_url)+'" target="_blank">profile</a>':'')+(x.email?' · '+esc(x.email):' · email needed')+'</div>').join('')||'<div class="small">No verified public contact recorded.</div>')+'<button onclick="openContact(\\''+esc(c.company_id)+'\\')">Add contact / email</button></div>').join('')}}
+else if(t==='contacts'){{const d=await get('/api/contacts');v.innerHTML='<h2>Contacts ('+(d.length)+')</h2>'+d.map(c=>'<div class="card">'+tag(c.email_status)+'<b>'+esc(c.full_name)+'</b> <span class="small">'+esc(c.title)+'</span><div class="small">'+esc(c.company_name||'')+' · '+(c.linkedin_url?'<a href="'+esc(c.linkedin_url)+'" target="_blank">profile</a>':'no profile')+' · '+(c.email?esc(c.email):'email needed')+'</div><div class="small">email source: '+esc(c.source_url||'manual / not recorded')+'</div></div>').join('')+addContactForm()}}
+else if(t==='drafts'){{const d=await get('/api/drafts');v.innerHTML='<h2>Drafts ('+(d.length)+')</h2>'+d.map(x=>'<div class="card"><span class="small">#'+x.id+'</span> '+tag(x.state)+' '+tag(x.draft_type)+'<label>Subject</label><input id="subj-'+x.id+'" value="'+esc(x.subject)+'"><label>Message</label><textarea id="body-'+x.id+'" rows="12">'+esc(x.body)+'</textarea><button class="dim" onclick="editDraft('+x.id+')">Save edits</button><button onclick="act('+x.id+',\'approve\')">Approve</button><button class="dim" onclick="act('+x.id+',\'save_gmail\')">Save Gmail draft</button><button class="dim" onclick="act('+x.id+',\'send\')">Send…</button><button class="dim" onclick="act('+x.id+',\'mark_sent\')">Mark sent manually</button><button class="danger" onclick="act('+x.id+',\'reject\')">Reject</button></div>').join('')}}
 else if(t==='followups'){{const d=await get('/api/followups');v.innerHTML='<h2>Follow-ups due ('+(d.length)+')</h2>'+d.map(f=>'<div class="card">'+tag('pending')+'#<b>'+f.followup_number+'</b> due '+esc(f.due_on)+'<div class="small">'+esc(f.reason)+'</div></div>').join('')}}
 else if(t==='linkedin'){{const d=await get('/api/linkedin');v.innerHTML='<h2>LinkedIn queue ('+(d.length)+')</h2>'+d.map(t2=>'<div class="card">'+tag(t2.status)+'<b>'+esc(t2.profile_url)+'</b><pre>'+esc(t2.connection_note)+'</pre><div class="small">'+esc(t2.next_action)+'</div></div>').join('')}}
 else if(t==='activity'){{const d=await get('/api/activity');v.innerHTML='<h2>Recent activity</h2>'+d.map(a=>'<div class="card"><span class="small">'+esc(a.at)+'</span> '+tag(a.entity)+' '+esc(a.entity_id)+' <b>'+esc(a.from_state)+'→'+esc(a.to_state)+'</b></div>').join('')}}
@@ -411,10 +526,14 @@ function addContactForm(){{return '<div class="card"><h2>Add contact (paste emai
 '<div class="col"><label>Role</label><select id="c_role"><option value="cto">CTO</option><option value="founder">Founder/CEO</option><option value="engineering_manager">Engineering Manager</option><option value="recruiter">Recruiter</option><option value="engineer">Engineer</option></select></div></div>'+
 '<div class="row"><div class="col"><label>Email (unverified until confirmed)</label><input id="c_email" type="email"></div>'+
 '<div class="col"><label>LinkedIn URL</label><input id="c_linkedin"></div></div>'+
+'<label>Email / contact source URL (Apollo export, company page, etc.)</label><input id="c_source" placeholder="https://…">'+
 '<button onclick="saveContact()">Save & generate draft</button></div>'}}
-async function saveContact(){{const r=await post('/api/contacts',{{company_id:$('#c_company').value,full_name:$('#c_name').value,title:$('#c_title').value,role_kind:$('#c_role').value,email:$('#c_email').value,linkedin_url:$('#c_linkedin').value}});
+async function saveContact(){{const r=await post('/api/contacts',{{company_id:$('#c_company').value,full_name:$('#c_name').value,title:$('#c_title').value,role_kind:$('#c_role').value,email:$('#c_email').value,linkedin_url:$('#c_linkedin').value,source_url:$('#c_source').value}});
 if(r.warnings&&r.warnings.length)alert('Warnings:\\n'+r.warnings.join('\\n'));
-show('contacts')}}
+if(r.draft_id){{alert((r.draft_already_exists?'Existing':'New')+' draft #'+r.draft_id+' is ready for review.');show('drafts')}}else show('contacts')}}
+async function editDraft(id){{const r=await post('/api/drafts/'+id+'/edit',{{subject:$('#subj-'+id).value,body:$('#body-'+id).value}});if(!r.ok)alert(JSON.stringify(r));show('drafts')}}
+async function openContact(companyId){{await show('contacts');$('#c_company').value=companyId;$('#c_name').focus()}}
+async function verifyJob(url,status){{const note=status==='fresh'?'re-verified against employer source':(prompt('Reason for '+status+'? (optional)','')||'');const r=await post('/api/jobs/verify',{{url:url,status:status,note:note}});alert(JSON.stringify(r));show('jobs')}}
 async function act(id,a){{if(a==='send'){{if(!confirm('Send this message? This sends real email.'))return;const r=await post('/api/drafts/'+id+'/send',{{confirm:true}});alert(JSON.stringify(r))}}
 else{{const r=await post('/api/drafts/'+id+'/'+a,{{}});alert(JSON.stringify(r))}}
 show('drafts')}}

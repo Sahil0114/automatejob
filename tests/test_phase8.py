@@ -87,12 +87,44 @@ class TestContactCompanyAssociation(unittest.TestCase):
         self.assertEqual(len(contact), 1)
         self.assertEqual(contact[0]["company_id"], "acme-hash")
 
+    def test_contact_email_domain_mismatch_warns_for_manual_review(self):
+        r = add_contact_and_draft(self.o, profile(), "acme.com", "Jane", "CTO",
+                                  "cto", "jane@globex.com")
+        self.assertTrue(any("domain does not match" in w for w in r.warnings))
+
     def test_contact_not_misassociated(self):
         # email for Acme must not attach to Globex
         r = add_contact_and_draft(self.o, profile(), "globex.com", "John", "EM",
                                   "engineering_manager", "john@globex.com")
         acme_contacts = self.o.list_contacts("acme-hash")
         self.assertEqual(len(acme_contacts), 0)
+class TestAuditedJobRegressions(unittest.TestCase):
+    def setUp(self):
+        from automatejob.config import AppConfig
+        self.cfg = AppConfig.load("config.toml")
+
+    def test_inferedge_two_plus_years_stays_review_not_actionable(self):
+        from automatejob.models import Job
+        from automatejob.qualification import classify_job
+        job = Job(
+            source_type="yc_waas", source_token="inferedge", external_id="120102",
+            title="Software Engineer - AI Platform", company="InferEdge", location="Mumbai, MH, IN",
+            url="https://www.workatastartup.com/jobs/120102",
+            description="Software Engineer - AI Platform | 2+ years | AI platform", freshness="fresh")
+        classify_job(job, self.cfg, None)
+        self.assertEqual(job.seniority, "review")
+        self.assertEqual(job.actionable, 0)
+
+    def test_zepto_legacy_listing_needs_verification_not_actionable(self):
+        from automatejob.models import Job
+        from automatejob.qualification import classify_job
+        job = Job(
+            source_type="yc_waas", source_token="zepto", external_id="43469",
+            title="Founding Backend Engineer", company="Zepto", location="Mumbai, India / Remote",
+            url="https://www.workatastartup.com/jobs/43469",
+            description="Founding Backend Engineer", freshness="needs_verification")
+        classify_job(job, self.cfg, None)
+        self.assertEqual(job.actionable, 0)
 
 
 if __name__ == "__main__":

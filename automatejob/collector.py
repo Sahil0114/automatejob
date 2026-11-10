@@ -52,6 +52,9 @@ class Collector:
                 jobs = source.fetch()
                 seen_dedup_keys: set = set()
                 for job in jobs:
+                    # Preserve explicit human freshness decisions across a
+                    # normal source refresh before the actionable gate runs.
+                    self.storage.apply_stored_freshness(job)
                     self.classify_and_score(job)
                     seen_dedup_keys.add(job.dedup_key)
 
@@ -106,4 +109,5 @@ class Collector:
             posted_at=row.get("posted_at") or "",
             description=row.get("description") or "",
             secondary_locations=secondary,
+            freshness=row.get("freshness") or "fresh",
         )

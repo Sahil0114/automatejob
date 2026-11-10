@@ -104,6 +104,7 @@ class Job:
     role_family: str = ""            # engineering family from role_family.py
     location_preference: str = ""    # mumbai | relocation | remote
     actionable: int = 0              # 1 when all gates pass
+    freshness: str = "fresh"         # fresh | needs_verification | stale
 
     @property
     def company_normalized(self) -> str:

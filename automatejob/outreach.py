@@ -70,7 +70,9 @@ CREATE TABLE IF NOT EXISTS contacts (
     linkedin_url     TEXT NOT NULL DEFAULT '',
     source_url       TEXT NOT NULL DEFAULT '',
     last_enriched    TEXT NOT NULL DEFAULT '',
-    dedup_key        TEXT UNIQUE NOT NULL
+    dedup_key        TEXT UNIQUE NOT NULL,
+    is_fixture       INTEGER NOT NULL DEFAULT 0,
+    fixture_note     TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS contact_enrichment (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,7 +108,11 @@ CREATE TABLE IF NOT EXISTS outreach_drafts (
     evidence_map     TEXT NOT NULL DEFAULT '{}',
     state            TEXT NOT NULL DEFAULT 'draft_ready',  -- draft_ready/awaiting_approval/approved/sent/rejected
     created_at       TEXT NOT NULL,
-    approved_at      TEXT NOT NULL DEFAULT ''
+    approved_at      TEXT NOT NULL DEFAULT '',
+    gmail_draft_id   TEXT NOT NULL DEFAULT '',
+    gmail_message_id TEXT NOT NULL DEFAULT '',
+    gmail_thread_id  TEXT NOT NULL DEFAULT '',
+    recipient        TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS outbound_messages (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -218,6 +224,16 @@ MSG_CONFIRMATION_UNKNOWN = "confirmation_unknown"
 MSG_FAILED = "failed"
 
 
+_OUTREACH_MIGRATIONS = (
+    ("contacts", "is_fixture", "INTEGER NOT NULL DEFAULT 0"),
+    ("contacts", "fixture_note", "TEXT NOT NULL DEFAULT ''"),
+    ("outreach_drafts", "gmail_draft_id", "TEXT NOT NULL DEFAULT ''"),
+    ("outreach_drafts", "gmail_message_id", "TEXT NOT NULL DEFAULT ''"),
+    ("outreach_drafts", "gmail_thread_id", "TEXT NOT NULL DEFAULT ''"),
+    ("outreach_drafts", "recipient", "TEXT NOT NULL DEFAULT ''"),
+)
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -259,7 +275,14 @@ class OutreachStorage:
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(_SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        for table, column, declaration in _OUTREACH_MIGRATIONS:
+            existing = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            if column not in existing:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
     def close(self) -> None:
         self.conn.close()
@@ -360,6 +383,44 @@ class OutreachStorage:
         self.conn.commit()
         return cur.lastrowid
 
+    def ensure_draft(self, company_id: str, draft_type: str, subject: str, body: str,
+                     evidence_map: dict, contact_id: Optional[int] = None,
+                     job_id: Optional[int] = None) -> tuple[int, bool]:
+        """Create a local reviewable draft once; return (id, created).
+
+        Repeating the same contact-save event must not produce another pending
+        identical draft. Rejected/sent drafts do not block a later new draft.
+        """
+        if contact_id is not None:
+            row = self.conn.execute(
+                "SELECT id FROM outreach_drafts WHERE contact_id=? AND draft_type=? "
+                "AND subject=? AND body=? AND state NOT IN ('rejected','sent') "
+                "ORDER BY id DESC LIMIT 1",
+                (contact_id, draft_type, subject, body)).fetchone()
+            if row:
+                return row["id"], False
+        return self.create_draft(company_id, draft_type, subject, body, evidence_map,
+                                 contact_id=contact_id, job_id=job_id), True
+
+    def update_draft(self, draft_id: int, subject: str, body: str) -> bool:
+        """Update a local draft and require fresh approval after any edit.
+
+        Gmail-created and sent drafts are immutable locally to avoid divergence
+        from the remote message. Editing an approved draft returns it to
+        ``draft_ready`` rather than preserving stale approval.
+        """
+        row = self.conn.execute(
+            "SELECT state FROM outreach_drafts WHERE id=?", (draft_id,)).fetchone()
+        if row is None or row["state"] in ("gmail_draft", "sent"):
+            return False
+        new_state = "draft_ready"
+        self.conn.execute(
+            "UPDATE outreach_drafts SET subject=?, body=?, state=?, approved_at='' WHERE id=?",
+            (subject, body, new_state, draft_id))
+        self.audit("draft", draft_id, row["state"], new_state, "edited")
+        self.conn.commit()
+        return True
+
     def approve_draft(self, draft_id: int) -> bool:
         row = self.conn.execute(
             "SELECT state FROM outreach_drafts WHERE id=?", (draft_id,)).fetchone()
@@ -371,6 +432,30 @@ class OutreachStorage:
         self.audit("draft", draft_id, row["state"], "approved", "")
         self.conn.commit()
         return True
+
+    def record_gmail_draft(self, draft_id: int, gmail_draft_id: str,
+                           gmail_message_id: str, gmail_thread_id: str,
+                           recipient: str) -> dict:
+        """Persist Gmail draft metadata exactly once (safe on retry).
+
+        A duplicate dashboard click must return the originally persisted Gmail
+        id and must not overwrite it; callers check this before another Gmail
+        API create call.
+        """
+        row = self.conn.execute(
+            "SELECT * FROM outreach_drafts WHERE id=?", (draft_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"unknown draft {draft_id}")
+        if row["gmail_draft_id"]:
+            return dict(row)
+        self.conn.execute(
+            "UPDATE outreach_drafts SET state='gmail_draft', gmail_draft_id=?, "
+            "gmail_message_id=?, gmail_thread_id=?, recipient=? WHERE id=?",
+            (gmail_draft_id, gmail_message_id, gmail_thread_id, recipient, draft_id))
+        self.audit("draft", draft_id, row["state"], "gmail_draft", "Gmail draft created")
+        self.conn.commit()
+        return dict(self.conn.execute(
+            "SELECT * FROM outreach_drafts WHERE id=?", (draft_id,)).fetchone())
 
     def list_drafts(self, state: Optional[str] = None) -> List[dict]:
         sql = "SELECT * FROM outreach_drafts"
@@ -481,11 +566,24 @@ class OutreachStorage:
             (company_id.strip().lower(), company_id)).fetchone()
         return dict(row) if row else None
 
-    def list_contacts_joined(self) -> List[dict]:
-        return [dict(r) for r in self.conn.execute(
+    def list_contacts_joined(self, include_fixtures: bool = False) -> List[dict]:
+        sql = (
             "SELECT c.*, o.name AS company_name, o.domain AS company_domain, o.state AS company_state "
-            "FROM contacts c LEFT JOIN outreach_companies o ON c.company_id=o.company_id "
-            "ORDER BY c.id DESC").fetchall()]
+            "FROM contacts c LEFT JOIN outreach_companies o ON c.company_id=o.company_id"
+        )
+        if not include_fixtures:
+            sql += " WHERE c.is_fixture=0"
+        sql += " ORDER BY c.id DESC"
+        return [dict(r) for r in self.conn.execute(sql).fetchall()]
+
+    def mark_contact_fixture(self, contact_id: int, note: str) -> bool:
+        """Hide an accidental fixture/smoke-test contact without deleting it."""
+        cur = self.conn.execute(
+            "UPDATE contacts SET is_fixture=1, fixture_note=? WHERE id=?", (note, contact_id))
+        if cur.rowcount:
+            self.audit("contact", contact_id, "production", "fixture", note)
+        self.conn.commit()
+        return cur.rowcount > 0
 
     # -- outbound messages ---------------------------------------------------
     def record_send(self, draft_id: Optional[int], contact_id: Optional[int],

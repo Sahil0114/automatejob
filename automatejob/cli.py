@@ -23,7 +23,7 @@ from .outreach import OutreachStorage
 from .pipeline import build_shortlist
 from .profile import AnswerBank, CandidateProfile, UnverifiedField
 from .storage import Storage
-from .workflow import add_contact_and_draft, import_contacts_csv
+from .workflow import add_contact_and_draft, import_contacts_csv, sync_gmail_replies
 
 log = logging.getLogger("automatejob")
 
@@ -562,13 +562,15 @@ def cmd_dashboard(cfg: AppConfig, args) -> int:
     import os
     out = OutreachStorage(cfg.outreach_db_path)
     cstore = CompanyStorage(cfg.companies_db_path)
+    jobs_store = Storage(cfg.db_path)
     token = args.token or os.environ.get("AUTOMATEJOB_DASHBOARD_TOKEN", "")
     profile = CandidateProfile("data/candidate_profile.toml")
     gmail = GmailAdapter(GmailConfig(
         credentials_file=os.environ.get("GMAIL_CREDENTIALS_FILE", ""),
         token_file=os.environ.get("GMAIL_TOKEN_FILE", "")),
         sending_enabled=args.enable_send)
-    server, _ = run_dashboard(out, companies_store=cstore, host=args.host,
+    server, _ = run_dashboard(out, companies_store=cstore, jobs_store=jobs_store,
+                              host=args.host,
                               port=args.port, token=token,
                               gmail=gmail, profile=profile,
                               sending_enabled=args.enable_send)
@@ -585,6 +587,40 @@ def cmd_dashboard(cfg: AppConfig, args) -> int:
     except KeyboardInterrupt:
         server.shutdown()
     return 0
+
+
+def cmd_gmail_auth(cfg: AppConfig, args) -> int:
+    """Run the user-initiated local OAuth browser flow; never called by cron."""
+    import os
+    credentials = args.credentials_file or os.environ.get("GMAIL_CREDENTIALS_FILE", "")
+    token = args.token_file or os.environ.get("GMAIL_TOKEN_FILE", "")
+    adapter = GmailAdapter(GmailConfig(credentials_file=credentials, token_file=token))
+    result = adapter.authorize_interactive(port=args.port)
+    if result.get("ok"):
+        print(f"Gmail authorized for {result.get('email') or '(account verified)'}.")
+        print(f"Token saved locally: {token}")
+        return 0
+    print(f"Gmail authorization not completed: {result.get('error', 'unknown error')}")
+    return 1
+
+
+def cmd_gmail_sync(cfg: AppConfig, args) -> int:
+    """Explicitly sync authorized Gmail reply state; never sends messages."""
+    import os
+    gmail = GmailAdapter(GmailConfig(
+        credentials_file=os.environ.get("GMAIL_CREDENTIALS_FILE", ""),
+        token_file=os.environ.get("GMAIL_TOKEN_FILE", "")))
+    out = OutreachStorage(cfg.outreach_db_path)
+    try:
+        result = sync_gmail_replies(out, gmail)
+        if result.get("error"):
+            print(f"Gmail sync not run: {result['error']}")
+            return 1
+        print(f"Gmail reply sync: {result['replies_recorded']} reply/replies recorded; "
+              f"{result['unknown_threads']} thread(s) need mailbox review.")
+        return 0
+    finally:
+        out.close()
 
 
 def cmd_contact(cfg: AppConfig, args) -> int:
@@ -698,6 +734,21 @@ def cmd_mark_sent(cfg: AppConfig, args) -> int:
         return 0
     finally:
         out.close()
+
+
+def cmd_verify_job(cfg: AppConfig, args) -> int:
+    storage = _open_storage(cfg)
+    try:
+        n = storage.set_freshness(args.url, args.status, args.note or "")
+        if n == 0:
+            print(f"No job matched {args.url!r}. Use the job URL or job id.")
+            return 1
+        print(f"Marked {n} job(s) as {args.status}: {args.url}")
+        if args.note:
+            print(f"  note: {args.note}")
+        return 0
+    finally:
+        storage.close()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -815,6 +866,18 @@ def build_parser() -> argparse.ArgumentParser:
                      help="DANGER: allow actually sending email (default off)")
     pda.set_defaults(func=cmd_dashboard)
 
+    pga = sub.add_parser("gmail-auth", help="authorize the standalone local Gmail OAuth client")
+    pga.add_argument("--credentials-file", default="",
+                     help="OAuth Desktop client JSON (or GMAIL_CREDENTIALS_FILE)")
+    pga.add_argument("--token-file", default="",
+                     help="local token JSON (or GMAIL_TOKEN_FILE)")
+    pga.add_argument("--port", type=int, default=0,
+                     help="local OAuth callback port (0 chooses one)")
+    pga.set_defaults(func=cmd_gmail_auth)
+
+    pgs = sub.add_parser("gmail-sync", help="sync replies from authorized Gmail threads; never sends")
+    pgs.set_defaults(func=cmd_gmail_sync)
+
     pc = sub.add_parser("contact", help="add/list/import contacts (manual enrichment)")
     pc.add_argument("--add", action="store_true", help="add a contact")
     pc.add_argument("--company", help="company_id")
@@ -863,6 +926,14 @@ def build_parser() -> argparse.ArgumentParser:
     pms.add_argument("--sent-at", default="", help="actual send timestamp (ISO)")
     pms.add_argument("--thread-id", default="")
     pms.set_defaults(func=cmd_mark_sent)
+
+    pvj = sub.add_parser("verify-job",
+                         help="flag a job's freshness (stale / needs_verification / fresh)")
+    pvj.add_argument("url", help="job URL or job id")
+    pvj.add_argument("--status", required=True,
+                     choices=["fresh", "needs_verification", "stale"])
+    pvj.add_argument("--note", default="", help="reason (e.g. employer page shows 0 jobs)")
+    pvj.set_defaults(func=cmd_verify_job)
 
     return p
 

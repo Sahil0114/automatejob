@@ -18,24 +18,20 @@ Scopes actually used (least privilege):
 
 ## 2. Authorize once (interactive step — run manually)
 
-The OAuth flow needs Google's Python libraries and a browser. Install them and
-run Google's official quickstart pattern against your `gmail-credentials.json`:
-
-```bash
-pip install --user google-auth-oauthlib google-api-python-client
-```
-
-Write a short script following
-https://developers.google.com/workspace/gmail/api/quickstart/python that reads
-`GMAIL_CREDENTIALS_FILE` and writes the token to `GMAIL_TOKEN_FILE`. This runs
-once, opens a browser for consent, and stores a refresh token locally.
-
-Set the env vars the adapter reads:
+The project includes the official installed-app OAuth flow. After downloading
+`gmail-credentials.json`, authorize from the local desktop session:
 
 ```bash
 export GMAIL_CREDENTIALS_FILE=~/.config/automatejob/gmail-credentials.json
 export GMAIL_TOKEN_FILE=~/.config/automatejob/gmail-token.json
+chmod 600 "$GMAIL_CREDENTIALS_FILE"
+python3 -m automatejob gmail-auth
 ```
+
+This opens a browser consent screen, verifies the selected Gmail account, and
+writes `GMAIL_TOKEN_FILE` with mode `0600`. It is never called by the collector,
+cron job, or dashboard startup. If it fails or you cancel consent, no token is
+created and the copy-email workflow remains available.
 
 Neither file is ever committed (both are git-ignored). Tokens are never logged.
 
@@ -50,7 +46,9 @@ python3 -m automatejob dashboard --token <your-token> --enable-send   # send (re
 
 A draft created in Gmail is NOT a sent email. Sending stays disabled unless
 `--enable-send` is passed AND you explicitly approve the exact recipient,
-subject and body of each message.
+subject and body of each message. After OAuth, run `python3 -m automatejob
+gmail-sync` manually to check tracked Gmail threads for replies; it only records
+reply state and suppresses follow-ups, and never sends email.
 
 ## Without OAuth: copy-email workflow
 

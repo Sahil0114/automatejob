@@ -66,6 +66,18 @@ def add_contact_and_draft(outreach: OutreachStorage, profile: CandidateProfile,
             warnings.append(f"email already belongs to contact #{existing['id']} "
                             f"({existing['full_name']})")
 
+        # A corporate address with a different domain is not proof of an
+        # employer relationship. Keep the contact/draft editable, but flag it
+        # for manual review rather than silently treating it as confirmed.
+        company_domain = (company or {}).get("domain", "").lower().removeprefix("www.")
+        email_domain = email.rsplit("@", 1)[-1].lower() if "@" in email else ""
+        personal_domains = {"gmail.com", "outlook.com", "hotmail.com", "yahoo.com", "proton.me", "protonmail.com"}
+        if (company_domain and email_domain and email_domain not in personal_domains
+                and email_domain != company_domain
+                and not email_domain.endswith("." + company_domain)):
+            warnings.append("email domain does not match intended company domain — "
+                            "verify the contact-company association")
+
     # 3. suppression checks
     if outreach.is_suppressed(company_id=company_id, email=email):
         warnings.append("company or email is suppressed")
@@ -179,3 +191,27 @@ def send_draft(outreach: OutreachStorage, gmail: GmailAdapter, draft_id: int,
                 "message_id": msg_id,
                 "detail": "reconcile against Gmail before retrying"}
     return {"ok": False, "status": "failed", "detail": result.get("error", "")}
+
+
+def sync_gmail_replies(outreach: OutreachStorage, gmail: GmailAdapter) -> dict:
+    """Read authorized Gmail thread state and suppress follow-ups on replies.
+
+    This is explicit/manual (never a scheduled sender). An unknown Gmail state
+    is reported and left pending for review; it is never treated as "no reply".
+    """
+    if not gmail.available():
+        return {"replies_recorded": 0, "unknown_threads": 0, "error": "gmail_unavailable"}
+    replies_recorded = 0
+    unknown_threads = 0
+    threads = outreach.conn.execute(
+        "SELECT thread_id FROM gmail_threads WHERE status='active'").fetchall()
+    for row in threads:
+        thread_id = row["thread_id"]
+        has_reply = gmail.thread_has_reply(thread_id)
+        if has_reply is True:
+            outreach.record_reply(thread_id, "reply", from_addr="", body="")
+            replies_recorded += 1
+        elif has_reply is None:
+            unknown_threads += 1
+    return {"replies_recorded": replies_recorded, "unknown_threads": unknown_threads,
+            "error": ""}

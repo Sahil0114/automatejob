@@ -174,14 +174,20 @@ a tracked, approval-gated outreach queue:
   personalized email from verified facts + company evidence, with an evidence
   map linking every claim to its source. Use `--save` to store it.
 - `dashboard` serves a mobile-friendly web UI (`http://127.0.0.1:8090`) with
-  bearer-token auth; bind to a private address only and always pass `--token`.
+  session-cookie auth; bind to a private address only and always pass `--token`.
+- `verify-job <url> --status fresh|needs_verification|stale` records source
+  freshness. A stale/unverified listing can never be actionable merely because
+  its URL continues responding.
 
 The pipeline database records contacts, enrichment history, company evidence,
 drafts, outbound messages, Gmail threads, follow-ups, replies, interviews, and
 audit events. Status changes append audit events rather than overwriting
-history. **Nothing sends email or applies to jobs** — drafts and follow-ups
-require explicit approval, and the Gmail/Apollo adapters are dry-run only until
-credentials are authorized.
+history. **Nothing sends email or applies to jobs** — all sends remain disabled
+unless individually approved after explicitly enabling the separate send path.
+When local Gmail OAuth is authorized, `gmail-auth` creates a 0600 local token,
+real Gmail drafts can be created, and `gmail-sync` can read tracked threads to
+suppress follow-ups after replies. OAuth is never started by collection/cron;
+see `docs/gmail-oauth.md`.
 
 ### Manual contact enrichment (no Apollo API required)
 

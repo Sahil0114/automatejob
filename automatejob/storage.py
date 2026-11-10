@@ -90,6 +90,12 @@ _MIGRATIONS = [
     ("status", "TEXT NOT NULL DEFAULT 'open'"),
     ("absent_scans", "INTEGER NOT NULL DEFAULT 0"),
     ("changed_at", "TEXT NOT NULL DEFAULT ''"),
+    # Freshness / verification state (manual + source-level checks). A job that
+    # is stale or needs re-verification is never actionable, even if its URL
+    # still responds. Default 'fresh' means no adverse signal recorded.
+    ("freshness", "TEXT NOT NULL DEFAULT 'fresh'"),
+    ("freshness_note", "TEXT NOT NULL DEFAULT ''"),
+    ("freshness_checked_at", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 _COLUMNS = (
@@ -109,7 +115,7 @@ class Storage:
         self.db_path = str(db_path)
         if self.db_path != ":memory:":
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.db_path)
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(_CREATE_TABLE)
@@ -353,6 +359,41 @@ class Storage:
              job.eligibility_reason, job.seniority, job.role_family,
              job.location_preference, job.actionable, job.content_hash, job_id),
         )
+
+    def set_freshness(self, url: str, status: str, note: str = "") -> int:
+        """Flag a stored job's freshness by its URL (or job id).
+
+        ``status`` is one of: fresh | needs_verification | stale. A stale or
+        needs_verification listing is never actionable even if its URL still
+        responds. Returns the number of rows updated.
+        """
+        if status not in ("fresh", "needs_verification", "stale"):
+            raise ValueError(f"invalid freshness status {status!r}")
+        try:
+            job_id = int(url)
+            cur = self.conn.execute(
+                "UPDATE jobs SET freshness=?, freshness_note=?, freshness_checked_at=? "
+                "WHERE id=?", (status, note, self._now(), job_id))
+        except ValueError:
+            cur = self.conn.execute(
+                "UPDATE jobs SET freshness=?, freshness_note=?, freshness_checked_at=? "
+                "WHERE url=? OR apply_url=? OR url_normalized=?",
+                (status, note, self._now(), url, url, url))
+        self.conn.commit()
+        return cur.rowcount
+
+    def apply_stored_freshness(self, job: Job) -> Job:
+        """Copy a prior manual freshness decision onto a newly fetched posting.
+
+        Sources never know a human's stale/needs-verification decision. Without
+        this, a successful source refresh could recompute `actionable` as if
+        the job were fresh while the database flag remained adverse.
+        """
+        row = self.conn.execute(
+            "SELECT freshness FROM jobs WHERE dedup_key=?", (job.dedup_key,)).fetchone()
+        if row and row["freshness"] in ("stale", "needs_verification"):
+            job.freshness = row["freshness"]
+        return job
 
     def export_rows(self, rows: List[dict]) -> List[dict]:
         out = []

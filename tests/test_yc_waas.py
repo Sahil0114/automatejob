@@ -78,6 +78,7 @@ class TestYCJobsSource(unittest.TestCase):
         by_id = {int(j.external_id): j for j in jobs}
         junior = by_id[72514]
         # "Global" is surfaced from the title into the location field.
+        self.assertEqual(junior.location, "Remote (Global)")
         self.assertIn("global", junior.location.lower())
         classify_job(junior, cfg, None)
         self.assertEqual(junior.eligibility, "confirmed")

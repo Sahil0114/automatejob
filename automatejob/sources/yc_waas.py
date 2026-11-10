@@ -96,7 +96,7 @@ class YCJobsSource(BaseSource):
             if ("global" in tl or "worldwide" in tl or "anywhere" in tl) \
                     and "global" not in location.lower() \
                     and "worldwide" not in location.lower():
-                location = f"{location} (Global)".strip(" ()")
+                location = f"{location} (Global)"
 
             workplace = "remote" if "remote" in (location + " " + title).lower() else ""
             if "hybrid" in (location + " " + title).lower():
