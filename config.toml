@@ -104,6 +104,13 @@ type = "simplifyjobs"
 token = "New-Grad-Positions"
 name = "SimplifyJobs: New Grad Positions"
 
+# YC Work-at-a-Startup job board: comma-separated YC company slugs. Fetches the
+# structured job list from each company's official workatastartup.com page.
+[[sources]]
+type = "yc_waas"
+token = "mixrank,zepto,solari-ai,craze,coupl,imt-care,inferedge,neodocs,nino-foods,propreturns,veera-health,kodo,easyplan,pillarplus,godutch,helpnow,taali-inc,algosurg-inc"
+name = "YC Work-at-a-Startup (Mumbai + remote)"
+
 # ---- target roles ---------------------------------------------------------
 # A role's keywords are matched against the job title (and description where
 # the source provides one). Short keywords (<=3 chars) are word-boundary

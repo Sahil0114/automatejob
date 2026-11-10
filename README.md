@@ -204,10 +204,12 @@ is explicitly passed AND Gmail OAuth is authorized.
 ### Sources
 
 Configured job sources now include Greenhouse / Lever / Ashby boards, the
-Hacker News "Who is hiring?" monthly thread (Algolia API), and the SimplifyJobs
+Hacker News "Who is hiring?" monthly thread (Algolia API), the SimplifyJobs
 Summer-2027 internships + New-Grad lists (public GitHub README tables, original
-employer links retained). US/Canada-only roles are excluded by the eligibility
-gate, not assumed open to India.
+employer links retained), and the YC Work-at-a-Startup job board (structured
+JSON embedded in each company page, e.g. MixRank's "Junior Software Engineer —
+Remote (Global)"). US/Canada-only roles are excluded by the eligibility gate,
+not assumed open to India.
 
 ## Tracking
 
