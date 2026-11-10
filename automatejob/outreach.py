@@ -190,6 +190,19 @@ CREATE TABLE IF NOT EXISTS profile_confirmations (
     source           TEXT NOT NULL DEFAULT '',
     confirmed_at     TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS job_applications (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id       TEXT NOT NULL,
+    company_name     TEXT NOT NULL DEFAULT '',
+    role             TEXT NOT NULL DEFAULT '',
+    job_url          TEXT NOT NULL DEFAULT '',
+    applied_at       TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'applied',  -- applied/in_review/interview/offer/rejected/withdrawn
+    notes            TEXT NOT NULL DEFAULT '',
+    source           TEXT NOT NULL DEFAULT 'manual',
+    created_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_applications_company ON job_applications(company_id);
 """
 
 # Outbound message states (kept distinct from Gmail draft states).
@@ -513,6 +526,33 @@ class OutreachStorage:
             "SELECT * FROM outbound_messages WHERE contact_id=? ORDER BY id DESC",
             (contact_id,)).fetchall()]
 
+    def mark_sent_manually(self, draft_id: int, sent_at: str, thread_id: str = "") -> int:
+        """Mark an APPROVED draft as sent manually (copy-email workflow), recording
+        the actual send timestamp. Idempotent: re-marking an already-sent draft
+        returns the existing message id. Never triggers a real send."""
+        row = self.conn.execute(
+            "SELECT * FROM outreach_drafts WHERE id=?", (draft_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"draft {draft_id} not found")
+        if row["state"] == "sent":
+            existing = self.conn.execute(
+                "SELECT id FROM outbound_messages WHERE draft_id=?", (draft_id,)).fetchone()
+            if existing:
+                return existing["id"]
+        if row["state"] != "approved":
+            raise ValueError("draft must be approved before marking as sent")
+        msg_id = self.record_send(
+            draft_id, row["contact_id"], row["company_id"], row["subject"],
+            row["body"], gmail_thread_id=thread_id, status=MSG_SENT)
+        # record_send stamps _now(); overwrite with the manual timestamp.
+        self.conn.execute(
+            "UPDATE outbound_messages SET sent_at=?, status='sent' WHERE id=?",
+            (sent_at, msg_id))
+        self.conn.execute(
+            "UPDATE outreach_drafts SET state='sent' WHERE id=?", (draft_id,))
+        self.conn.commit()
+        return msg_id
+
     # -- linkedin queue ------------------------------------------------------
     def add_linkedin_task(self, company_id: str, contact_id: Optional[int],
                           profile_url: str, connection_note: str = "",
@@ -548,6 +588,38 @@ class OutreachStorage:
     def list_profile_confirmations(self) -> dict:
         return {r["field"]: r["value"] for r in self.conn.execute(
             "SELECT field, value FROM profile_confirmations").fetchall()}
+
+    # -- applications --------------------------------------------------------
+    def record_application(self, company_id: str, role: str, applied_at: str,
+                           company_name: str = "", job_url: str = "",
+                           status: str = "applied", notes: str = "",
+                           source: str = "manual") -> int:
+        """Record a job application. Deduplicates on company+role+applied_at."""
+        existing = self.conn.execute(
+            "SELECT id FROM job_applications WHERE company_id=? AND role=? AND applied_at=?",
+            (company_id, role, applied_at)).fetchone()
+        if existing:
+            return existing["id"]
+        cur = self.conn.execute(
+            "INSERT INTO job_applications (company_id,company_name,role,job_url,applied_at,"
+            "status,notes,source,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (company_id, company_name, role, job_url, applied_at, status, notes, source, _now()))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def has_application(self, company_id: str) -> bool:
+        return bool(self.conn.execute(
+            "SELECT 1 FROM job_applications WHERE company_id=?", (company_id,)).fetchone())
+
+    def latest_application(self, company_id: str) -> Optional[dict]:
+        row = self.conn.execute(
+            "SELECT * FROM job_applications WHERE company_id=? ORDER BY applied_at DESC LIMIT 1",
+            (company_id,)).fetchone()
+        return dict(row) if row else None
+
+    def list_applications(self) -> List[dict]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT * FROM job_applications ORDER BY applied_at DESC").fetchall()]
 
     # -- metrics -------------------------------------------------------------
     def metrics(self) -> dict:

@@ -58,10 +58,19 @@ _JUNIOR_TERMS = [
 _INTERN_TERMS = ["intern", "internship", "co-op", "coop", "co op"]
 
 # A credible "0–2 years" experience band in the text -> junior.
+# NOTE: "2+ years" is deliberately EXCLUDED — it means "at least 2 years",
+# which is the upper edge of the junior band and excludes most fresh grads;
+# it maps to REVIEW (borderline) instead.
 _JUNIOR_EXPERIENCE = re.compile(
-    r"\b(?:0|1|2)\s*[-–—]\s*(?:1|2)\s*(?:\+\s*)?\s*(?:years?|yrs?)\b"
-    r"|\b(?:0|1|2)\s*(?:\+\s*)\s*(?:years?|yrs?)\b"
+    r"\b(?:0|1|2)\s*[-–—]\s*(?:1|2)\s*(?:years?|yrs?)\b"
+    r"|\b(?:0|1)\s*(?:\+\s*)\s*(?:years?|yrs?)\b"
     r"|\bup\s+to\s+2\s*(?:\+\s*)?\s*years\b",
+    re.IGNORECASE,
+)
+# "2+ years" / "2+ yrs" — the boundary between junior and mid-level -> review.
+_BORDERLINE_EXPERIENCE = re.compile(
+    r"\b2\s*(?:\+\s*)\s*(?:years?|yrs?)\b"
+    r"|\b2\s*[-–—]\s*3\s*(?:years?|yrs?)\b",
     re.IGNORECASE,
 )
 # 3–5 years -> intermediate.
@@ -111,9 +120,12 @@ def classify_seniority(job: Job) -> str:
     has_senior = _has(_SENIOR_TERMS, text)
     has_lead = _has(_LEAD_TERMS, text)
     has_intermediate = _has(_INTERMEDIATE_TERMS, title)
+    # "Founding X Engineer" is a high-bar early hire, not a junior role.
+    has_founding = _has(["founding"], title)
 
     # Experience bands in the description (title experience is rare, but check both).
     junior_exp = bool(_JUNIOR_EXPERIENCE.search(full))
+    borderline_exp = bool(_BORDERLINE_EXPERIENCE.search(full))
     intermediate_exp = bool(_INTERMEDIATE_EXPERIENCE.search(full))
     senior_exp = bool(_SENIOR_EXPERIENCE.search(full))
 
@@ -140,6 +152,11 @@ def classify_seniority(job: Job) -> str:
     if has_intermediate:
         return INTERMEDIATE
 
+    # "Founding" without an explicit senior/lead marker -> review (high-bar early
+    # hire, not a confirmed junior role).
+    if has_founding:
+        return REVIEW
+
     # Experience-band-based calls: the HIGHEST band wins. A JD listing
     # "4+ years of Go" alongside "2+ years of TypeScript" is mid/senior, not
     # junior — the junior band must not override a higher primary requirement.
@@ -149,6 +166,8 @@ def classify_seniority(job: Job) -> str:
         return INTERMEDIATE
     if junior_exp:
         return JUNIOR
+    if borderline_exp:
+        return REVIEW
 
     # Level-coded "Engineer 3" / "Engineer II" that isn't caught above.
     m = _LEVEL_CODE.search(title)

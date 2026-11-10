@@ -63,6 +63,19 @@ class TestSeniority(unittest.TestCase):
             job("Senior Engineer", description="1-2 years experience")), REVIEW)
         self.assertEqual(classify_seniority(job("Junior Senior Engineer")), REVIEW)
 
+    def test_two_plus_years_is_borderline_not_junior(self):
+        # "2+ years" means "at least 2 years" — not a confirmed junior role.
+        self.assertEqual(classify_seniority(
+            job("Software Engineer - AI Platform", description="2+ years building backend systems")), REVIEW)
+
+    def test_founding_engineer_is_review_not_junior(self):
+        # "Founding X Engineer" is a high-bar early hire, not a new-grad role.
+        self.assertEqual(classify_seniority(
+            job("Founding Backend Engineer", description="1+ years")), REVIEW)
+        # but "Founding Senior ..." with an explicit senior marker stays senior-track
+        self.assertIn(classify_seniority(job("Founding Senior Backend Engineer",
+                                             description="3+ years")), (SENIOR, REVIEW))
+
     def test_unknown_is_default(self):
         self.assertEqual(classify_seniority(job("Engineer")), UNKNOWN)
 

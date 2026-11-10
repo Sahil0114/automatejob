@@ -42,3 +42,9 @@ htmlcov/
 *.pem
 *.p12
 secrets*
+
+# Gmail OAuth credentials + tokens — never commit
+*gmail-credentials*.json
+*gmail-token*.json
+*credentials*.json
+*token*.json

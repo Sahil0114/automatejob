@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from .email_draft import draft_for_contact
+from .email_draft import draft_email, draft_for_contact
 from .gmail import GmailAdapter
 from .outreach import (
     MSG_CONFIRMATION_UNKNOWN, MSG_GMAIL_DRAFT, MSG_SENT, OutreachStorage,
@@ -83,12 +83,27 @@ def add_contact_and_draft(outreach: OutreachStorage, profile: CandidateProfile,
     # 4. generate personalized draft (fails honestly on unverified profile facts)
     company = outreach.get_company(company_id) or {"name": company_id, "domain": ""}
     evidence = outreach.list_evidence(company_id)
+
+    # If the user already applied to this company, draft a follow-up rather
+    # than a cold application.
+    existing_app = outreach.latest_application(company_id)
     try:
-        draft = draft_for_contact(
-            profile, company,
-            {"first_name": (full_name or "").split()[0] if full_name else "",
-             "role_kind": role_kind},
-            evidence=evidence)
+        if existing_app is not None:
+            draft = draft_email(
+                profile, company,
+                {"first_name": (full_name or "").split()[0] if full_name else "",
+                 "role_kind": role_kind},
+                "followup", evidence=evidence)
+            draft["evidence_map"]["existing_application"] = (
+                f"{existing_app['role']} applied {existing_app['applied_at']}")
+            warnings.append(f"existing application to {company.get('name', company_id)} "
+                            f"({existing_app['role']}) — drafted a follow-up, not a new application")
+        else:
+            draft = draft_for_contact(
+                profile, company,
+                {"first_name": (full_name or "").split()[0] if full_name else "",
+                 "role_kind": role_kind},
+                evidence=evidence)
     except UnverifiedField as e:
         draft = {"subject": "", "body": "",
                  "evidence_map": {}, "error": f"unverified profile field: {e}"}

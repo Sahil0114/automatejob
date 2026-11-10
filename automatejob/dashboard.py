@@ -65,6 +65,11 @@ def _esc(s):
             .replace('"', "&quot;"))
 
 
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
 class Dashboard:
     def __init__(self, outreach, companies_store=None, jobs_store=None,
                  token: str = "", gmail=None, profile=None, sending_enabled: bool = False):
@@ -193,6 +198,8 @@ class Dashboard:
             self._send(handler, self.outreach.list_due_followups())
         elif path == "/api/activity":
             self._send(handler, self._activity())
+        elif path == "/api/applications":
+            self._send(handler, self.outreach.list_applications())
         elif path == "/api/linkedin":
             self._send(handler, self.outreach.list_linkedin_tasks())
         elif path.startswith("/api/linkedin/") and method == "POST":
@@ -302,6 +309,16 @@ class Dashboard:
                 "UPDATE outreach_drafts SET state='gmail_draft' WHERE id=?", (draft_id,))
             self.outreach.conn.commit()
             self._send(handler, res)
+        elif action == "mark_sent":
+            # Copy-email workflow: user sent manually, record actual timestamp.
+            sent_at = body.get("sent_at") or _now_iso()
+            try:
+                msg_id = self.outreach.mark_sent_manually(
+                    draft_id, sent_at, body.get("thread_id", ""))
+                self._send(handler, {"ok": True, "message_id": msg_id,
+                                     "sent_at": sent_at})
+            except ValueError as e:
+                self._send(handler, {"ok": False, "error": str(e)}, 400)
         elif action == "send":
             self._send_draft(handler, draft_id, body)
         else:
@@ -381,7 +398,7 @@ const v=$('#view');
 if(t==='jobs'){{const d=await get('/api/overview');v.innerHTML='<h2>Overview</h2>'+metric(d)}}
 else if(t==='companies'){{const d=await get('/api/companies');v.innerHTML='<h2>Companies ('+(d.length)+')</h2>'+d.map(c=>'<div class="card">'+tag(c.qualification)+'<b>'+esc(c.name)+'</b> <span class="small">'+esc(c.domain)+'</span><div class="small">score '+Math.round(c.score||0)+'</div></div>').join('')}}
 else if(t==='contacts'){{const d=await get('/api/contacts');v.innerHTML='<h2>Contacts ('+(d.length)+')</h2>'+d.map(c=>'<div class="card">'+tag(c.email_status)+'<b>'+esc(c.full_name)+'</b> <span class="small">'+esc(c.title)+'</span><div class="small">'+esc(c.company_name||'')+' · '+esc(c.email)+'</div></div>').join('')+addContactForm()}}
-else if(t==='drafts'){{const d=await get('/api/drafts');v.innerHTML='<h2>Drafts ('+(d.length)+')</h2>'+d.map(x=>'<div class="card"><span class="small">#'+x.id+'</span> '+tag(x.state)+' '+tag(x.draft_type)+'<b>'+esc(x.subject)+'</b><pre>'+esc(x.body)+'</pre><button onclick="act('+x.id+',\'approve\')">Approve</button><button class="dim" onclick="act('+x.id+',\'save_gmail\')">Save Gmail draft</button><button class="dim" onclick="act('+x.id+',\'send\')">Send…</button><button class="danger" onclick="act('+x.id+',\'reject\')">Reject</button></div>').join('')}}
+else if(t==='drafts'){{const d=await get('/api/drafts');v.innerHTML='<h2>Drafts ('+(d.length)+')</h2>'+d.map(x=>'<div class="card"><span class="small">#'+x.id+'</span> '+tag(x.state)+' '+tag(x.draft_type)+'<b>'+esc(x.subject)+'</b><pre>'+esc(x.body)+'</pre><button onclick="act('+x.id+',\'approve\')">Approve</button><button class="dim" onclick="act('+x.id+',\'save_gmail\')">Save Gmail draft</button><button class="dim" onclick="act('+x.id+',\'send\')">Send…</button><button class="dim" onclick="act('+x.id+',\'mark_sent\')">Mark sent manually</button><button class="danger" onclick="act('+x.id+',\'reject\')">Reject</button></div>').join('')}}
 else if(t==='followups'){{const d=await get('/api/followups');v.innerHTML='<h2>Follow-ups due ('+(d.length)+')</h2>'+d.map(f=>'<div class="card">'+tag('pending')+'#<b>'+f.followup_number+'</b> due '+esc(f.due_on)+'<div class="small">'+esc(f.reason)+'</div></div>').join('')}}
 else if(t==='linkedin'){{const d=await get('/api/linkedin');v.innerHTML='<h2>LinkedIn queue ('+(d.length)+')</h2>'+d.map(t2=>'<div class="card">'+tag(t2.status)+'<b>'+esc(t2.profile_url)+'</b><pre>'+esc(t2.connection_note)+'</pre><div class="small">'+esc(t2.next_action)+'</div></div>').join('')}}
 else if(t==='activity'){{const d=await get('/api/activity');v.innerHTML='<h2>Recent activity</h2>'+d.map(a=>'<div class="card"><span class="small">'+esc(a.at)+'</span> '+tag(a.entity)+' '+esc(a.entity_id)+' <b>'+esc(a.from_state)+'→'+esc(a.to_state)+'</b></div>').join('')}}

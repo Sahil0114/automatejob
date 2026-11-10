@@ -659,6 +659,47 @@ def cmd_readiness(cfg: AppConfig, args) -> int:
         out.close()
 
 
+def cmd_apply(cfg: AppConfig, args) -> int:
+    out = OutreachStorage(cfg.outreach_db_path)
+    try:
+        app_id = out.record_application(
+            args.company, args.role, args.applied_at,
+            company_name=args.company_name or args.company,
+            job_url=args.job_url or "", status=args.status, notes=args.notes)
+        print(f"Recorded application #{app_id}: {args.role} @ {args.company_name or args.company} "
+              f"(applied {args.applied_at})")
+        return 0
+    finally:
+        out.close()
+
+
+def cmd_applications(cfg: AppConfig, args) -> int:
+    out = OutreachStorage(cfg.outreach_db_path)
+    try:
+        for a in out.list_applications():
+            print(f"#{a['id']} [{a['status']:12s}] {a['role'][:40]:40} @ {a['company_name'][:24]:24} "
+                  f"applied {a['applied_at']}")
+            if a["notes"]:
+                print(f"    notes: {a['notes']}")
+        if not out.list_applications():
+            print("(no applications recorded)")
+        return 0
+    finally:
+        out.close()
+
+
+def cmd_mark_sent(cfg: AppConfig, args) -> int:
+    out = OutreachStorage(cfg.outreach_db_path)
+    try:
+        from datetime import datetime, timezone
+        sent_at = args.sent_at or datetime.now(timezone.utc).isoformat()
+        msg_id = out.mark_sent_manually(args.draft_id, sent_at, args.thread_id or "")
+        print(f"Draft #{args.draft_id} marked sent manually (message #{msg_id}, at {sent_at}).")
+        return 0
+    finally:
+        out.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="automatejob",
@@ -802,6 +843,26 @@ def build_parser() -> argparse.ArgumentParser:
     prd = sub.add_parser("readiness", help="outreach-readiness score for shortlisted companies")
     prd.add_argument("--limit", type=int, default=20)
     prd.set_defaults(func=cmd_readiness)
+
+    pap = sub.add_parser("apply", help="record a job application")
+    pap.add_argument("--company", required=True, help="company id/domain/name")
+    pap.add_argument("--role", required=True, help="role title")
+    pap.add_argument("--applied-at", required=True, help="ISO date (e.g. 2026-10-24)")
+    pap.add_argument("--company-name", default="", help="display name")
+    pap.add_argument("--job-url", default="")
+    pap.add_argument("--status", default="applied",
+                     choices=["applied", "in_review", "interview", "offer", "rejected", "withdrawn"])
+    pap.add_argument("--notes", default="")
+    pap.set_defaults(func=cmd_apply)
+
+    papps = sub.add_parser("applications", help="list recorded applications")
+    papps.set_defaults(func=cmd_applications)
+
+    pms = sub.add_parser("mark-sent", help="mark an approved draft as sent manually (copy-email workflow)")
+    pms.add_argument("--draft-id", type=int, required=True)
+    pms.add_argument("--sent-at", default="", help="actual send timestamp (ISO)")
+    pms.add_argument("--thread-id", default="")
+    pms.set_defaults(func=cmd_mark_sent)
 
     return p
 
