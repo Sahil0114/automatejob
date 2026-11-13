@@ -58,6 +58,11 @@ CREATE TABLE IF NOT EXISTS companies (
 );
 CREATE INDEX IF NOT EXISTS idx_companies_category ON companies(category);
 CREATE INDEX IF NOT EXISTS idx_companies_domain ON companies(domain);
+CREATE TABLE IF NOT EXISTS collection_checkpoints (
+    name       TEXT PRIMARY KEY,
+    value      TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
 """
 
 _COLUMNS = (
@@ -298,3 +303,20 @@ class CompanyStorage:
             "SELECT COUNT(*) c FROM companies WHERE remote_policy IN (?, ?)",
             (REMOTE_INDIA, REMOTE_WORLDWIDE)).fetchone()["c"])
         return out
+
+    # -- collection checkpoints (resumable pagination) ----------------------
+    def get_checkpoint(self, name: str) -> str:
+        row = self.conn.execute(
+            "SELECT value FROM collection_checkpoints WHERE name=?", (name,)).fetchone()
+        return row["value"] if row else ""
+
+    def set_checkpoint(self, name: str, value: str) -> None:
+        self.conn.execute(
+            "INSERT INTO collection_checkpoints (name, value, updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(name) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (name, value, self._now()))
+        self.conn.commit()
+
+    def clear_checkpoint(self, name: str) -> None:
+        self.conn.execute("DELETE FROM collection_checkpoints WHERE name=?", (name,))
+        self.conn.commit()

@@ -401,8 +401,10 @@ def cmd_discover(cfg: AppConfig, args) -> int:
     jobs = Storage(cfg.db_path)
     try:
         disc = CompanyDiscovery(cstore, jobs_storage=jobs)
-        total = disc.discover_yc(max_pages=args.yc_pages)
-        print(f"Discovered {total} YC companies.")
+        result = disc.discover_yc(max_pages=args.yc_pages)
+        print(f"Discovered {result['fetched']} YC companies across {result['pages']} page(s) "
+              f"(pagination complete={result['completed']}).")
+        print(f"Distinct companies in DB: {result['distinct_stored']}.")
         if args.ats:
             relevant = [disc._row_to_company(r) for r in
                         cstore.list(mumbai=True, limit=args.ats_limit)]
@@ -717,50 +719,269 @@ def cmd_firecrawl(cfg: AppConfig, args) -> int:
 
 def cmd_registry(cfg: AppConfig, args) -> int:
     """Show the source registry (statuses are explicit; unsupported != active)."""
-    from .source_registry import SourceRegistry
+    from .source_registry import SourceRegistry, seed_defaults
     reg = SourceRegistry("data/source_registry.db")
     try:
-        if args.refresh:
-            _seed_source_registry(reg)
+        if args.refresh or reg.count() == 0:
+            seed_defaults(reg)
         rows = reg.list_all()
         if not rows:
-            _seed_source_registry(reg)
+            seed_defaults(reg)
             rows = reg.list_all()
-        for r in rows:
-            print(f"{r['status']:11s} {r['name']:16s} {r['source_type']:12s} "
-                  f"{r['classification']:8s} auth={bool(r['auth_required'])} "
-                  f"perm={r['permission']}")
-            if r["last_successful_at"]:
-                print(f"             last ok {r['last_successful_at']} "
-                      f"verified={r['last_verified_records']} errors={r['error_count']}")
+        if args.verbose:
+            for r in rows:
+                print(f"{r['status']:11s} {r['name']:20s} [{r['integration_status']}]")
+                print(f"             {r['source_category']} | {r['access_method']} | auth={bool(r['auth_required'])} perm={r['permission']}")
+                if r["website"]:
+                    print(f"             site: {r['website']}")
+                if r["source_url"]:
+                    print(f"             url:  {r['source_url']}")
+                if r["terms_url"]:
+                    print(f"             terms:{r['terms_url']}")
+                if r["provider_cost"] or r["firecrawl_credit_cost"]:
+                    print(f"             cost: provider={r['provider_cost'] or 'n/a'} firecrawl={r['firecrawl_credit_cost'] or 'n/a'}")
+                if r["reason"]:
+                    print(f"             reason: {r['reason']}")
+                if r["manual_workflow"]:
+                    print(f"             manual: {r['manual_workflow']}")
+                if r["last_successful_at"]:
+                    print(f"             last ok {r['last_successful_at']} verified={r['last_verified_records']} records={r['record_count']} errors={r['error_count']}")
+        else:
+            for r in rows:
+                print(f"{r['status']:11s} {r['name']:22s} {r['integration_status']:26s} "
+                      f"auth={bool(r['auth_required'])} perm={r['permission']:18s} {r['source_category']}")
         return 0
     finally:
         reg.close()
 
 
 def _seed_source_registry(reg) -> None:
-    """Seed known sources with honest status (never mark unsupported active)."""
-    from .source_registry import SourceStatus
-    known = [
-        ("greenhouse", "greenhouse", "api", "api", False, "authorized", "", "incremental", "board rate limit", "", SourceStatus.ACTIVE),
-        ("lever", "lever", "api", "api", False, "authorized", "", "incremental", "board rate limit", "", SourceStatus.ACTIVE),
-        ("ashby", "ashby", "api", "api", False, "authorized", "", "incremental", "board rate limit", "", SourceStatus.ACTIVE),
-        ("yc_waas", "yc_waas", "browser", "browser", False, "authorized", "", "incremental", "bounded", "", SourceStatus.ACTIVE),
-        ("hn", "hn", "api", "api", False, "authorized", "", "incremental", "1 req/s", "", SourceStatus.ACTIVE),
-        ("simplifyjobs", "simplifyjobs", "browser", "browser", False, "authorized", "", "incremental", "bounded", "", SourceStatus.ACTIVE),
-        ("firecrawl", "firecrawl", "api", "api", True, "authorized", "firecrawl-cli secure store", "on demand", "account limit", "800/month hard", SourceStatus.ACTIVE),
-        ("alexandria_yc", "ycombinator-com", "api", "api", True, "authorized", "firecrawl-cli secure store", "on demand", "provider", "5/call", SourceStatus.ACTIVE),
-        ("alexandria_blitzapi", "blitzapi", "api", "api", True, "authorized", "firecrawl-cli secure store", "on demand", "provider", "2 + 10/record", SourceStatus.PAUSED),
-        ("alexandria_harvestapi", "harvestapi", "api", "api", True, "authorized", "firecrawl-cli secure store", "on demand", "provider", "2/call", SourceStatus.ACTIVE),
-        ("apollo", "apollo", "api", "api", True, "unauthorized", "", "manual", "", "", SourceStatus.UNSUPPORTED),
-        ("linkedin", "linkedin", "browser", "browser", True, "unauthorized", "", "manual", "", "", SourceStatus.UNSUPPORTED),
-    ]
-    for (name, stype, access, classification, auth, perm, cred, refresh,
-         rate, budget, status) in known:
-        reg.upsert(name, stype, access=access, classification=classification,
-                   auth_required=auth, permission=perm, credential_reference=cred,
-                   refresh_policy=refresh, rate_limit=rate, credit_budget=budget,
-                   status=status)
+    """Seed the canonical source catalog (honest statuses)."""
+    from .source_registry import seed_defaults
+    seed_defaults(reg)
+
+
+def cmd_discovery_log(cfg: AppConfig, args) -> int:
+    from .discovery_log import DiscoveryLog
+    logdb = DiscoveryLog("data/discovery_log.db")
+    try:
+        summary = logdb.summary()
+        print(f"Discovery operations today: {summary['total']}")
+        for outcome, meta in summary["by_outcome"].items():
+            print(f"  {outcome:10s} {meta['count']}  (credits {meta['credits']:g})")
+        print("\nBy source:")
+        for s in summary["by_source"]:
+            print(f"  {s['source']:24s} {s['count']}  (credits {s['credits']:g})")
+        print("\nRecent operations:")
+        for op in logdb.list(limit=args.limit):
+            print(f"  #{op['id']} {op['started_at']} {op['source']:20s} "
+                  f"{op['outcome']:8s} records={op['returned_records']} "
+                  f"new_jobs={op['new_jobs']} new_companies={op['new_companies']} "
+                  f"credits={op['firecrawl_credits']:g}")
+            if op["error_reason"]:
+                print(f"      error: {op['error_reason']}")
+        return 0
+    finally:
+        logdb.close()
+
+
+def cmd_discovery_run(cfg: AppConfig, args) -> int:
+    """Run the bounded daily discovery plan across permitted sources only.
+
+    This is deterministic and conservative: it never exceeds Firecrawl budgets
+    and never touches restricted sources. Each operation is recorded in the
+    discovery log; a failure does not count as successful discovery.
+    """
+    from .discovery_log import DiscoveryLog
+    logdb = DiscoveryLog("data/discovery_log.db")
+    try:
+        ops = _build_discovery_plan(cfg)
+        print(f"Discovery plan: {len(ops)} operations.")
+        if args.dry_run:
+            for op in ops:
+                print(f"  [dry] {op['category']:28s} {op['source']:20s} {op['query'][:60]}")
+            return 0
+        for op in ops:
+            outcome, meta = _run_discovery_op(cfg, op)
+            op_id = logdb.start(op["source"], access_method=op.get("access_method", ""),
+                                query=op.get("query", ""),
+                                provider_cost=op.get("provider_cost", 0.0))
+            logdb.complete(op_id, outcome=outcome, **meta)
+            print(f"  [{outcome:8s}] {op['source']:20s} {op['query'][:60]} "
+                  f"-> records={meta.get('returned_records', 0)}")
+        print(f"\n{logdb.summary()['total']} operations accounted for today.")
+        return 0
+    finally:
+        logdb.close()
+
+
+def _build_discovery_plan(cfg: AppConfig) -> list:
+    """Return the bounded daily discovery plan (33 operations, permitted only).
+
+    The plan favours deterministic/free operations (existing API/RSS adapters,
+    source checks, company rechecks). Restricted portals are represented by
+    ``manual`` or ``skipped`` entries, never by an automated scrape — so the
+    accounting is honest about where the day's effort actually goes.
+    """
+    plan = []
+
+    # 1) ATS / company career pages (6): existing free board APIs + company rechecks.
+    for src in ("greenhouse", "lever", "ashby"):
+        plan.append({"category": "ats_job_board", "source": src, "access_method": "api",
+                     "query": f"collect {src}", "provider_cost": 0.0})
+    plan.append({"category": "ats_job_board", "source": "companies",
+                 "access_method": "public_scrape", "query": "recheck verified career pages",
+                 "provider_cost": 0.0})
+    plan.append({"category": "ats_job_board", "source": "companies",
+                 "access_method": "ats_detect", "query": "detect/validate ATS for watchlist",
+                 "provider_cost": 0.0})
+    plan.append({"category": "ats_job_board", "source": "companies",
+                 "access_method": "ats_detect", "query": "revalidate stale ATS tokens",
+                 "provider_cost": 0.0})
+
+    # 2) YC job/company discovery (5).
+    plan.append({"category": "yc_discovery", "source": "yc_waas",
+                 "access_method": "public_scrape", "query": "YC WaaS company jobs",
+                 "provider_cost": 0.0})
+    plan.append({"category": "yc_discovery", "source": "yc_directory",
+                 "access_method": "api", "query": "YC directory page(s)",
+                 "provider_cost": 0.0})
+    plan.append({"category": "yc_discovery", "source": "yc_directory",
+                 "access_method": "api", "query": "YC new-grad/junior scan",
+                 "provider_cost": 0.0})
+    plan.append({"category": "yc_discovery", "source": "yc_directory",
+                 "access_method": "api", "query": "YC Mumbai companies recheck",
+                 "provider_cost": 0.0})
+    plan.append({"category": "yc_discovery", "source": "yc_waas",
+                 "access_method": "public_scrape", "query": "YC remote-eligible companies",
+                 "provider_cost": 0.0})
+
+    # 3) Global remote-job sources (5).
+    plan.append({"category": "remote_job_board", "source": "weworkremotely",
+                 "access_method": "rss", "query": "remote programming RSS",
+                 "provider_cost": 0.0})
+    plan.append({"category": "remote_job_board", "source": "weworkremotely",
+                 "access_method": "rss", "query": "remote devops/sysadmin RSS",
+                 "provider_cost": 0.0})
+    plan.append({"category": "remote_job_board", "source": "hn",
+                 "access_method": "api", "query": "who is hiring (remote roles)",
+                 "provider_cost": 0.0})
+    plan.append({"category": "remote_job_board", "source": "firecrawl",
+                 "access_method": "search", "query": "worldwide remote junior backend",
+                 "provider_cost": 2.0})
+    plan.append({"category": "remote_job_board", "source": "firecrawl",
+                 "access_method": "search", "query": "india remote devops junior",
+                 "provider_cost": 2.0})
+
+    # 4) Recruiter posts from permitted sources (5).
+    plan.append({"category": "recruiter_posts", "source": "hn",
+                 "access_method": "api", "query": "hiring announcements with emails",
+                 "provider_cost": 0.0})
+    for i in range(4):
+        plan.append({"category": "recruiter_posts", "source": "manual",
+                     "access_method": "manual_import_only",
+                     "query": f"manual recruiter-post import slot {i + 1}",
+                     "provider_cost": 0.0})
+
+    # 5) Mumbai startup intelligence (3).
+    for src in ("yc_directory", "companies", "companies"):
+        plan.append({"category": "mumbai_intel", "source": src,
+                     "access_method": "api" if src == "yc_directory" else "db_recheck",
+                     "query": "Mumbai engineering-office recheck", "provider_cost": 0.0})
+
+    # 6) Previously discovered company verification (3).
+    for i in range(3):
+        plan.append({"category": "company_verify", "source": "companies",
+                     "access_method": "db_recheck",
+                     "query": f"reverify previously discovered company #{i + 1}",
+                     "provider_cost": 0.0})
+
+    # 7) Indian job portals and permitted feeds (6): all restricted/manual, honest.
+    for src in ("internshala", "indeed", "naukri", "foundit", "cutshort", "hirist"):
+        plan.append({"category": "india_portal", "source": src,
+                     "access_method": "manual_import_only",
+                     "query": "manual import / job-alert ingestion", "provider_cost": 0.0})
+
+    return plan
+
+
+def _run_discovery_op(cfg: AppConfig, op: dict):
+    """Execute one permitted discovery op; returns (outcome, metadata)."""
+    from .collector import Collector
+    from .companies import CompanyRegistry
+    from .company import CompanyStorage
+    from .storage import Storage
+
+    source = op["source"]
+    # Restricted/manual sources are never executed automatically.
+    if op.get("access_method") in ("manual_import_only", "requires_permission"):
+        return "skipped", {"returned_records": 0, "new_jobs": 0,
+                           "new_companies": 0, "duplicate_count": 0,
+                           "firecrawl_credits": 0.0,
+                           "error_reason": "manual/restricted source — not auto-run"}
+
+    try:
+        if source in ("greenhouse", "lever", "ashby", "hn", "yc_waas", "simplifyjobs"):
+            storage = Storage(cfg.db_path)
+            try:
+                collector = Collector(cfg, storage, registry=_load_registry(cfg))
+                new_jobs, errors = collector.collect()
+                return ("success" if not errors else "failure",
+                        {"returned_records": len(new_jobs), "new_jobs": len(new_jobs),
+                         "new_companies": 0, "duplicate_count": 0,
+                         "firecrawl_credits": 0.0,
+                         "error_reason": "; ".join(e["error"] for e in errors)})
+            finally:
+                storage.close()
+        if source == "weworkremotely":
+            from .sources.weworkremotely import WeWorkRemotelySource
+            src = WeWorkRemotelySource("remote-programming-jobs")
+            jobs = src.fetch()
+            return "success", {"returned_records": len(jobs), "new_jobs": 0,
+                               "new_companies": 0, "duplicate_count": 0,
+                               "firecrawl_credits": 0.0, "error_reason": ""}
+        if source == "firecrawl" and op.get("access_method") == "search":
+            from .firecrawl import FirecrawlBudget, FirecrawlCLI, FirecrawlConfig
+            settings = cfg.firecrawl
+            budget = FirecrawlBudget(settings.db_path, FirecrawlConfig(
+                enabled=settings.enabled, monthly_budget=settings.monthly_budget,
+                warning_threshold=settings.warning_threshold,
+                hard_stop_threshold=settings.hard_stop_threshold,
+                absolute_account_limit=settings.absolute_account_limit,
+                search_results_default=settings.search_results_default,
+                allow_payg=settings.allow_payg, db_path=settings.db_path))
+            try:
+                client = FirecrawlCLI(budget)
+                data = client.search(op["query"], limit=10, sources="web")
+                web = (data.get("data", {}) or {}).get("web") if isinstance(data, dict) else None
+                n = len(web) if isinstance(web, list) else 0
+                return "success", {"returned_records": n, "new_jobs": 0,
+                                   "new_companies": 0, "duplicate_count": 0,
+                                   "firecrawl_credits": 2.0, "error_reason": ""}
+            finally:
+                budget.close()
+        if source == "companies":
+            return "skipped", {"returned_records": 0, "new_jobs": 0, "new_companies": 0,
+                               "duplicate_count": 0, "firecrawl_credits": 0.0,
+                               "error_reason": "targeted recheck requires explicit selector (not auto-run)"}
+        if source == "yc_directory":
+            cstore = CompanyStorage(cfg.companies_db_path)
+            try:
+                from .discovery import CompanyDiscovery
+                result = CompanyDiscovery(cstore).discover_yc(max_pages=2)
+                return "success", {"returned_records": result["fetched"],
+                                   "new_jobs": 0, "new_companies": result["fetched"],
+                                   "duplicate_count": 0, "firecrawl_credits": 0.0,
+                                   "error_reason": ""}
+            finally:
+                cstore.close()
+        return "skipped", {"returned_records": 0, "new_jobs": 0, "new_companies": 0,
+                           "duplicate_count": 0, "firecrawl_credits": 0.0,
+                           "error_reason": f"no permitted runner for {source}"}
+    except Exception as exc:
+        return "failure", {"returned_records": 0, "new_jobs": 0, "new_companies": 0,
+                           "duplicate_count": 0, "firecrawl_credits": 0.0,
+                           "error_reason": str(exc)[:200]}
 
 
 def cmd_recruiter(cfg: AppConfig, args) -> int:
@@ -1218,6 +1439,14 @@ def build_parser() -> argparse.ArgumentParser:
     prg = sub.add_parser("registry", help="show the source registry")
     prg.add_argument("--refresh", action="store_true", help="re-seed known sources")
     prg.set_defaults(func=cmd_registry)
+
+    pdis = sub.add_parser("discovery-log", help="show daily discovery-operation accounting")
+    pdis.add_argument("--limit", type=int, default=100)
+    pdis.set_defaults(func=cmd_discovery_log)
+
+    pdis2 = sub.add_parser("discovery-run", help="run the bounded daily discovery operations (permitted sources only)")
+    pdis2.add_argument("--dry-run", action="store_true", help="list planned operations without executing")
+    pdis2.set_defaults(func=cmd_discovery_run)
 
     pc = sub.add_parser("contact", help="add/list/import contacts (manual enrichment)")
     pc.add_argument("--add", action="store_true", help="add a contact")

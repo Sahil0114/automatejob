@@ -196,12 +196,14 @@ class Dashboard:
         return out
 
     def _jobs(self, limit=40) -> list:
-        """Relevant open jobs with freshness + application status."""
+        """Relevant open jobs with 48-hour freshness + application status."""
         if self.jobs_store is None:
             return []
         rows = self.jobs_store.conn.execute(
             "SELECT id,title,company,location,url,seniority,eligibility,actionable,"
-            "freshness,freshness_note,location_preference,status FROM jobs "
+            "freshness,freshness_note,location_preference,status,"
+            "posted_at,first_seen_at,last_seen_at,last_verified_at,collected_at,"
+            "published_at,source_type FROM jobs "
             "WHERE status='open' AND (actionable=1 "
             "OR freshness IN ('stale','needs_verification') "
             "OR (eligibility='confirmed' AND seniority IN ('junior','internship','review') "
@@ -217,6 +219,7 @@ class Dashboard:
         for r in rows:
             d = dict(r)
             d["applied"] = None
+            d["freshness_48h"] = self._freshness_48h(d)
             job_key = application_company_key(d["company"])
             for a in apps:
                 if (application_company_key(a["company_name"]) == job_key
@@ -225,6 +228,56 @@ class Dashboard:
                     break
             out.append(d)
         return out
+
+    @staticmethod
+    def _freshness_48h(row: dict) -> str:
+        from .freshness import freshness_status
+        return freshness_status(
+            status=row.get("status", "open"),
+            published_at=row.get("published_at") or row.get("posted_at") or "",
+            last_verified_at=row.get("last_verified_at") or "",
+            last_seen_at=row.get("last_seen_at") or "",
+        )
+
+    def _sources(self) -> list:
+        from .source_registry import SourceRegistry, seed_defaults
+        reg = SourceRegistry("data/source_registry.db")
+        try:
+            if reg.count() == 0:
+                seed_defaults(reg)
+            return reg.list_all()
+        finally:
+            reg.close()
+
+    def _firecrawl_usage(self) -> dict:
+        from .firecrawl import FirecrawlBudget, FirecrawlCLI, FirecrawlConfig
+        from .config import AppConfig
+        try:
+            cfg = AppConfig.load("config.toml")
+        except Exception:
+            return {"error": "config unavailable"}
+        s = cfg.firecrawl
+        budget = FirecrawlBudget(s.db_path, FirecrawlConfig(
+            enabled=s.enabled, monthly_budget=s.monthly_budget,
+            warning_threshold=s.warning_threshold,
+            hard_stop_threshold=s.hard_stop_threshold,
+            absolute_account_limit=s.absolute_account_limit,
+            search_results_default=s.search_results_default, allow_payg=s.allow_payg,
+            db_path=s.db_path))
+        try:
+            account = FirecrawlCLI(budget).account_usage()
+            local = budget.usage()
+            return {"account": account, "local": local}
+        finally:
+            budget.close()
+
+    def _discovery_activity(self) -> dict:
+        from .discovery_log import DiscoveryLog
+        logdb = DiscoveryLog("data/discovery_log.db")
+        try:
+            return {"summary": logdb.summary(), "recent": logdb.list(limit=50)}
+        finally:
+            logdb.close()
 
     def _verify_job(self, handler):
         body = self._body(handler)
@@ -302,6 +355,12 @@ class Dashboard:
             self._send(handler, self._jobs())
         elif path == "/api/jobs/verify" and method == "POST":
             self._verify_job(handler)
+        elif path == "/api/sources":
+            self._send(handler, self._sources())
+        elif path == "/api/firecrawl-usage":
+            self._send(handler, self._firecrawl_usage())
+        elif path == "/api/discovery-activity":
+            self._send(handler, self._discovery_activity())
         elif path == "/api/recruiter-posts":
             self._send(handler, self.outreach.list_recruiter_posts())
         elif path == "/api/recruiter-posts/import" and method == "POST":
@@ -649,6 +708,8 @@ if(r.ok)location.href='/';else alert('invalid token');}}
 <button data-t="contacts">Contacts</button><button data-t="drafts">Drafts</button>
 <button data-t="applications">Applications</button><button data-t="followups">Follow-ups</button>
 <button data-t="linkedin">LinkedIn</button><button data-t="recruiter">Recruiter Posts</button>
+<button data-t="sources">Sources</button><button data-t="firecrawl">Firecrawl</button>
+<button data-t="discovery">Discovery</button>
 <button data-t="activity">Activity</button><button data-t="analytics">Analytics</button>
 <button data-t="profile">Profile</button><button onclick="logout()">Log out</button></div>
 <div id="view"></div></div>
@@ -662,7 +723,7 @@ function metric(o){{return Object.entries(o||{{}}).map(([k,v])=>'<div class="met
 async function show(t){{
 document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('on',b.dataset.t===t));
 const v=$('#view');
-if(t==='jobs'){{const d=await get('/api/jobs');v.innerHTML='<h2>Relevant jobs ('+(d.length)+')</h2>'+d.map(j=>'<div class="card">'+tag(j.freshness||'active')+'<b>'+esc(j.title)+'</b> <span class="small">'+esc(j.company)+'</span><div class="small">'+esc(j.location)+' · '+esc(j.seniority)+' · '+esc(j.location_preference)+(j.applied?' · <b>applied: '+esc(j.applied)+'</b>':'')+'</div><a href="'+esc(j.url)+'" target="_blank">'+esc(j.url)+'</a>'+(j.freshness!=='fresh'?'<div class="small">⚠ '+esc(j.freshness)+': '+esc(j.freshness_note)+'</div>':'')+'<button class="dim" onclick="verifyJob(\\''+esc(j.url)+'\\',\\'fresh\\')">Mark fresh</button><button class="dim" onclick="verifyJob(\\''+esc(j.url)+'\\',\\'needs_verification\\')">Needs verification</button><button class="danger" onclick="verifyJob(\\''+esc(j.url)+'\\',\\'stale\\')">Stale</button></div>').join('')}}
+if(t==='jobs'){{const d=await get('/api/jobs');v.innerHTML='<h2>Relevant jobs ('+(d.length)+')</h2><div class="small">48-hour freshness: newly posted / recently verified / verification overdue / uncertain / closed. Publication and collection times are kept separate.</div>'+d.map(j=>'<div class="card">'+tag(j.freshness||'active')+' '+tag(j.freshness_48h||'')+'<b>'+esc(j.title)+'</b> <span class="small">'+esc(j.company)+'</span><div class="small">'+esc(j.location)+' · '+esc(j.seniority)+' · '+esc(j.location_preference)+(j.applied?' · <b>applied: '+esc(j.applied)+'</b>':'')+'</div><div class="small">published '+esc(j.published_at||j.posted_at||'unknown')+' · first-seen '+esc(j.first_seen_at||'?')+' · last-seen '+esc(j.last_seen_at||'?')+' · last-verified '+esc(j.last_verified_at||'never')+'</div><a href="'+esc(j.url)+'" target="_blank">'+esc(j.url)+'</a>'+(j.freshness!=='fresh'?'<div class="small">⚠ '+esc(j.freshness)+': '+esc(j.freshness_note)+'</div>':'')+'<button class="dim" onclick="verifyJob(\\''+esc(j.url)+'\\',\\'fresh\\')">Mark fresh</button><button class="dim" onclick="verifyJob(\\''+esc(j.url)+'\\',\\'needs_verification\\')">Needs verification</button><button class="danger" onclick="verifyJob(\\''+esc(j.url)+'\\',\\'stale\\')">Stale</button></div>').join('')}}
 else if(t==='companies'){{const d=await get('/api/companies');v.innerHTML='<h2>Companies ('+(d.length)+')</h2>'+d.map(c=>'<div class="card">'+tag(c.qualification)+'<b>'+esc(c.name)+'</b> <span class="small">'+esc(c.domain)+'</span><div class="small">'+esc(c.state)+' · score '+Math.round(c.score||0)+'</div><div class="small"><b>Next:</b> '+esc(c.suggested_next_action)+'</div><h3>Research evidence</h3>'+((c.evidence||[]).map(e=>'<div class="small">'+tag(e.kind)+' '+esc(e.fact)+' <a href="'+esc(e.url)+'" target="_blank">source</a> · '+esc(e.observed_at)+'</div>').join('')||'<div class="small">No sourced evidence yet.</div>')+'<h3>Current vacancies</h3>'+((c.jobs||[]).map(j=>'<div class="small">'+tag(j.freshness)+'<a href="'+esc(j.url)+'" target="_blank">'+esc(j.title)+'</a> · '+esc(j.location)+' · '+esc(j.seniority)+(j.actionable?' · actionable':'')+'</div>').join('')||'<div class="small">No matching stored open role.</div>')+'<h3>Contacts</h3>'+((c.contacts||[]).map(x=>'<div class="small">'+tag(x.email_status)+'<b>'+esc(x.full_name)+'</b> · '+esc(x.title)+' '+(x.linkedin_url?'<a href="'+esc(x.linkedin_url)+'" target="_blank">profile</a>':'')+(x.email?' · '+esc(x.email):' · email needed')+'</div>').join('')||'<div class="small">No verified public contact recorded.</div>')+'<button onclick="openContact(\\''+esc(c.company_id)+'\\')">Add contact / email</button></div>').join('')}}
 else if(t==='contacts'){{const d=await get('/api/contacts');v.innerHTML='<h2>Contacts ('+(d.length)+')</h2>'+d.map(c=>'<div class="card">'+tag(c.email_status)+'<b>'+esc(c.full_name)+'</b> <span class="small">'+esc(c.title)+'</span><div class="small">'+esc(c.company_name||c.company_id||'')+' · '+(c.linkedin_url?'<a href="'+esc(c.linkedin_url)+'" target="_blank">profile</a>':'no profile')+' · '+(c.email?esc(c.email):'email needed')+'</div><div class="small">email source: '+esc(c.source_url||'manual / not recorded')+'</div><button class="dim" onclick="fillContact('+JSON.stringify(c)+')">Edit</button></div>').join('')+addContactForm()}}
 else if(t==='drafts'){{const d=await get('/api/drafts');v.innerHTML='<h2>Drafts ('+(d.length)+')</h2><div class="small">Copy-email workflow: approve, copy, send from your own client, then "Mark sent manually". "Save Gmail draft" only creates a Gmail draft (never sends). Sending requires per-message approval and --enable-send.</div>'+d.map(x=>'<div class="card"><span class="small">#'+x.id+'</span> '+tag(x.state)+' '+tag(x.draft_type)+' <span class="small">'+esc(x.recipient||'')+'</span><label>Subject</label><input id="subj-'+x.id+'" value="'+esc(x.subject)+'"><label>Message</label><textarea id="body-'+x.id+'" rows="12">'+esc(x.body)+'</textarea><button class="dim" onclick="editDraft('+x.id+')">Save edits</button><button onclick="act('+x.id+',\\'approve\\')">Approve</button><button class="dim" onclick="act('+x.id+',\\'save_gmail\\')">Save Gmail draft</button><button class="dim" onclick="act('+x.id+',\\'send\\')">Send…</button><button class="dim" onclick="act('+x.id+',\\'mark_sent\\')">Mark sent manually</button><button class="danger" onclick="act('+x.id+',\\'reject\\')">Reject</button></div>').join('')}}
@@ -671,6 +732,9 @@ else if(t==='followups'){{const d=await get('/api/followups');v.innerHTML='<h2>F
 else if(t==='linkedin'){{const d=await get('/api/linkedin');v.innerHTML='<h2>LinkedIn queue ('+(d.length)+')</h2>'+d.map(t2=>'<div class="card">'+tag(t2.status)+'<b>'+esc(t2.profile_url)+'</b><pre>'+esc(t2.connection_note)+'</pre><div class="small">'+esc(t2.last_action||'')+'</div></div>').join('')}}
 else if(t==='recruiter'){{const d=await get('/api/recruiter-posts');v.innerHTML='<h2>Recruiter posts ('+(d.length)+')</h2>'+d.map(p=>'<div class="card">'+tag(p.status)+'<b>'+esc(p.company||'(company unknown)')+'</b> <span class="small">'+esc(p.recruiter_name||'recruiter not identified')+(p.recruiter_title?' · '+esc(p.recruiter_title):'')+'</span><div class="small">published '+esc(p.published_at||'unknown')+' · verified '+esc(p.last_verified_at||'never')+' · <a href="'+esc(p.original_url)+'" target="_blank">original post</a></div>'+((p.roles||[]).map(r=>'<div class="small">• '+esc(r.title)+(r.location?' — '+esc(r.location):'')+(r.experience?' · '+esc(r.experience):'')+'</div>').join('')||'<div class="small">No roles extracted.</div>')+(p.published_emails&&p.published_emails.length?'<div class="small">Published emails: '+esc(p.published_emails.join(', '))+'</div>':'')+'<button class="dim" onclick="postStatus('+p.id+',\\'verified\\')">Verify</button><button class="dim" onclick="postStatus('+p.id+',\\'applied\\')">Mark applied</button><button class="dim" onclick="postStatus('+p.id+',\\'expired\\')">Expired</button><button class="danger" onclick="postStatus('+p.id+',\\'irrelevant\\')">Irrelevant</button></div>').join('')+recruiterForm()}}
 else if(t==='activity'){{const d=await get('/api/activity');v.innerHTML='<h2>Recent activity</h2>'+d.map(a=>'<div class="card"><span class="small">'+esc(a.at)+'</span> '+tag(a.entity)+' '+esc(a.entity_id)+' <b>'+esc(a.from_state)+'→'+esc(a.to_state)+'</b><div class="small">'+esc(a.note||'')+'</div></div>').join('')}}
+else if(t==='sources'){{const d=await get('/api/sources');v.innerHTML='<h2>Source registry ('+(d.length)+')</h2><div class="small">Sources with an honest integration status. "paused"/"unsupported" are never treated as active; restricted portals are manual-import only.</div>'+d.map(s=>'<div class="card">'+tag(s.status)+' <b>'+esc(s.name)+'</b> <span class="small">['+esc(s.integration_status)+'] '+esc(s.source_category)+'</span><div class="small">'+esc(s.website||'')+' · auth='+s.auth_required+' · perm='+esc(s.permission)+'</div>'+(s.reason?'<div class="small">reason: '+esc(s.reason)+'</div>':'')+(s.manual_workflow?'<div class="small">manual: '+esc(s.manual_workflow)+'</div>':'')+'</div>').join('')}}
+else if(t==='firecrawl'){{const d=await get('/api/firecrawl-usage');const a=(d&&d.account)||{{}};const l=(d&&d.local)||{{}};v.innerHTML='<h2>Firecrawl usage</h2><div class="card"><div class="small"><b>Account (authoritative):</b> source='+esc(a.source||'unknown')+' remaining='+esc(a.remaining!==undefined?a.remaining:'n/a')+' plan='+esc(a.plan||'n/a')+'</div><div class="small"><b>Local ledger (estimate):</b> monthly '+esc(l.monthly_consumed)+' daily '+esc(l.daily_consumed)+' · remaining '+esc(l.internal_budget_remaining)+' / limit '+esc(l.budget_limit)+'</div><div class="small">warning '+esc(l.warning_threshold)+' hard-stop '+esc(l.hard_stop_threshold)+' absolute '+esc(l.absolute_account_limit)+' · allow_payg '+esc(l.allow_payg)+' · paid ops paused '+esc(l.paid_operations_paused)+'</div><div class="small">failed ops '+esc(l.failed_operations)+' (credits '+esc(l.failed_operations_credits)+') · unknown '+esc(l.unknown_operations)+'</div><div class="small">by endpoint: '+JSON.stringify(l.by_endpoint||{{}})+'</div><div class="small">by provider: '+JSON.stringify(l.by_provider||{{}})+'</div></div>'}}
+else if(t==='discovery'){{const d=await get('/api/discovery-activity');const s=(d&&d.summary)||{{}};v.innerHTML='<h2>Discovery operations ('+(s.total||0)+' today)</h2><div class="card">'+Object.entries(s.by_outcome||{{}}).map(([k,o])=>'<div class="small">'+tag(k)+' '+esc(o.count)+' ops · '+esc(o.credits)+' credits</div>').join('')+'</div>'+((d&&d.recent)||[]).map(o=>'<div class="card"><span class="small">'+esc(o.started_at)+'</span> '+tag(o.outcome)+' <b>'+esc(o.source)+'</b><div class="small">'+esc(o.query)+' · records '+esc(o.returned_records)+' new_jobs '+esc(o.new_jobs)+' credits '+esc(o.firecrawl_credits)+'</div>'+(o.error_reason?'<div class="small">'+esc(o.error_reason)+'</div>':'')+'</div>').join('')}}
 else if(t==='analytics'){{const d=await get('/api/overview');v.innerHTML='<h2>Analytics</h2>'+metric(d)}}
 else if(t==='profile'){{const d=await get('/api/profile');const missing=(d&&d.missing)||[];const confirmed=(d&&d.confirmed)||{{}};v.innerHTML='<h2>Candidate profile checklist</h2><div class="small">Personal details remain local and git-ignored. Confirm fields below (stored locally in outreach.db); never invented or inferred.</div>'+(missing.length?'<div class="card"><b>Unverified fields needing confirmation ('+missing.length+')</b><ul>'+missing.map(m=>'<li>'+esc(m)+' <button class="dim" onclick="confirmField(\\''+esc(m)+'\\')">Confirm</button></li>').join('')+'</ul></div>':'<div class="card tag ok">Profile confirmations complete.</div>')+'<div class="card"><h3>Confirmed overrides</h3>'+Object.entries(confirmed).map(([k,v])=>'<div class="small"><b>'+esc(k)+'</b>: '+esc(v)+'</div>').join('')+'<label>Field</label><input id="pf_field" placeholder="notice_period / availability / work_authorization"><label>Value</label><input id="pf_value"><button onclick="saveProfile()">Save confirmation</button></div>'}}
 }}

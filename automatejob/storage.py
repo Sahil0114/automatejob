@@ -102,6 +102,7 @@ _MIGRATIONS = [
     ("last_verified_at", "TEXT NOT NULL DEFAULT ''"),
     ("source_updated_at", "TEXT NOT NULL DEFAULT ''"),
     ("collected_at", "TEXT NOT NULL DEFAULT ''"),
+    ("published_at", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 _COLUMNS = (
@@ -113,6 +114,7 @@ _COLUMNS = (
     "role_family", "location_preference", "actionable",
     "cross_board_key", "content_hash", "status", "absent_scans", "changed_at",
     "is_new", "first_seen_at", "last_seen_at",
+    "published_at",
 )
 
 
@@ -182,7 +184,8 @@ class Storage:
                     "eligibility_reason = ?, seniority = ?, role_family = ?, "
                     "location_preference = ?, actionable = ?, cross_board_key = ?, "
                     "content_hash = ?, changed_at = ?, absent_scans = 0, "
-                    "status = 'open', is_new = 0, last_seen_at = ? "
+                    "status = 'open', is_new = 0, last_seen_at = ?, "
+                    "published_at = ?, collected_at = ? "
                     "WHERE dedup_key = ?",
                     (job.title, job.title_normalized, job.company,
                      job.company_normalized, job.location, job.url, job.url_normalized,
@@ -192,7 +195,8 @@ class Storage:
                      json.dumps(job.score_reasons), job.eligibility,
                      job.eligibility_reason, job.seniority, job.role_family,
                      job.location_preference, job.actionable, job.cross_board_key,
-                     job.content_hash, changed_at, now, job.dedup_key),
+                     job.content_hash, changed_at, now,
+                     job.posted_at or "", now, job.dedup_key),
                 )
                 if content_changed:
                     changed.append(job)
@@ -209,6 +213,10 @@ class Storage:
         row["is_new"] = 1
         row["first_seen_at"] = now
         row["last_seen_at"] = now
+        # Publication time = source-provided posted_at; collection time is now.
+        # These are never conflated.
+        row["published_at"] = job.posted_at or ""
+        row["collected_at"] = now
         return row
 
     def mark_absent(

@@ -10,10 +10,11 @@ from .greenhouse import GreenhouseSource
 from .hn import HNSource
 from .lever import LeverSource
 from .simplifyjobs import SimplifyJobsSource
+from .weworkremotely import WeWorkRemotelySource
 from .yc_waas import YCJobsSource
 
 __all__ = ["BaseSource", "GreenhouseSource", "LeverSource", "AshbySource",
-           "HNSource", "SimplifyJobsSource", "YCJobsSource"]
+           "HNSource", "SimplifyJobsSource", "WeWorkRemotelySource", "YCJobsSource"]
 
 SOURCE_REGISTRY = {
     "greenhouse": GreenhouseSource,
@@ -21,6 +22,7 @@ SOURCE_REGISTRY = {
     "ashby": AshbySource,
     "hn": HNSource,
     "simplifyjobs": SimplifyJobsSource,
+    "weworkremotely": WeWorkRemotelySource,
     "yc_waas": YCJobsSource,
 }
 

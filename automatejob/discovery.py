@@ -28,15 +28,34 @@ class CompanyDiscovery:
         self.storage = company_storage
         self.jobs_storage = jobs_storage
 
-    def discover_yc(self, max_pages: Optional[int] = None, delay: float = 1.0) -> int:
-        """Fetch YC companies page-by-page, storing incrementally (resume-safe)."""
-        source = YCDirectorySource(max_pages=max_pages, delay=delay)
+    def discover_yc(self, max_pages: Optional[int] = None, delay: float = 1.0,
+                    resume: bool = True) -> dict:
+        """Fetch YC companies page-by-page, storing incrementally (resume-safe).
+
+        Returns reconciliation metrics: total records fetched, distinct companies
+        stored, pages processed, and whether pagination completed."""
+        start_url = self.storage.get_checkpoint("yc_directory_next_page") if resume else ""
+        source = YCDirectorySource(max_pages=max_pages, delay=delay, start_url=start_url)
         total = 0
-        for batch in source.iter_pages():
+        pages = 0
+        completed = False
+        for batch, next_page in source.iter_pages():
             self.storage.upsert(batch)
             total += len(batch)
-        log.info("yc_directory: fetched %d companies", total)
-        return total
+            pages += 1
+            if next_page:
+                self.storage.set_checkpoint("yc_directory_next_page", next_page)
+            else:
+                self.storage.clear_checkpoint("yc_directory_next_page")
+                completed = True
+        log.info("yc_directory: fetched %d companies across %d pages (complete=%s)",
+                 total, pages, completed)
+        return {
+            "fetched": total,
+            "pages": pages,
+            "completed": completed,
+            "distinct_stored": self.storage.count(),
+        }
 
     def detect_ats_for(self, companies: List[Company], limit: Optional[int] = None,
                        delay: float = 1.0) -> int:

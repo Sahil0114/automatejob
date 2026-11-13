@@ -65,34 +65,43 @@ def _get_json(http, url: str, timeout: float = 20.0, retries: int = 2, delay: fl
 
 
 class YCDirectorySource(CompanySource):
-    """Fetch YC companies, paginated (bounded by ``max_pages``)."""
+    """Fetch YC companies, paginated (bounded by ``max_pages``, resumable)."""
 
     source_type = "yc_directory"
 
-    def __init__(self, http=None, max_pages: Optional[int] = None, delay: float = 1.0):
+    def __init__(self, http=None, max_pages: Optional[int] = None, delay: float = 1.0,
+                 start_url: str = ""):
         if http is None:
             import requests
             http = requests.Session()
         self._http = http
         self.max_pages = max_pages
         self.delay = delay
+        # Resume support: if a prior run recorded the next page URL, start there.
+        self.start_url = start_url or YC_API
 
     def fetch(self) -> List[Company]:
         out: List[Company] = []
-        for batch in self.iter_pages():
+        for batch, _next_url in self.iter_pages():
             out.extend(batch)
         return out
 
     def iter_pages(self):
-        """Yield one page's companies at a time (resume-safe, bounded)."""
-        url = YC_API
+        """Yield one page's companies at a time (resume-safe, bounded).
+
+        Yields ``(companies, next_page_url)`` pairs so callers can checkpoint the
+        ``next_page_url`` after storing each page; an interrupted run resumes at
+        the last persisted URL.
+        """
+        url = self.start_url
         pages = 0
         while url:
             pages += 1
             if self.max_pages and pages > self.max_pages:
                 break
             data = _get_json(self._http, url)
-            yield [self._map(item) for item in data.get("companies", [])]
+            yield ([self._map(item) for item in data.get("companies", [])],
+                   data.get("nextPage") or "")
             url = data.get("nextPage") or ""
             if url and self.delay:
                 time.sleep(self.delay)

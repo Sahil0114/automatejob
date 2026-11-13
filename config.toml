@@ -104,6 +104,17 @@ type = "simplifyjobs"
 token = "New-Grad-Positions"
 name = "SimplifyJobs: New Grad Positions"
 
+# We Work Remotely: public RSS feed (permitted, no auth).
+[[sources]]
+type = "weworkremotely"
+token = "remote-programming-jobs"
+name = "We Work Remotely: Remote Programming"
+
+[[sources]]
+type = "weworkremotely"
+token = "remote-devops-sysadmin-jobs"
+name = "We Work Remotely: DevOps & Sysadmin"
+
 # YC Work-at-a-Startup job board: comma-separated YC company slugs. Fetches the
 # structured job list from each company's official workatastartup.com page.
 [[sources]]

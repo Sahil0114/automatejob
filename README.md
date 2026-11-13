@@ -381,9 +381,12 @@ python -m automatejob firecrawl alexandria ycombinator-com companies/job_search 
   roles with no stated experience. We do not guess.
 - **Foreign detection is city/country-list based.** Uncommon cities may leak
   into needs_verification (conservatively, never into the shortlist).
-- **Only Greenhouse, Lever, Ashby, YC Work-at-a-Startup, Hacker News and
-  SimplifyJobs** are implemented as job sources; Workday/Jobvite/LinkedIn/
-  Indeed have no public API. LinkedIn enrichment is explicitly unsupported.
+- **Only Greenhouse, Lever, Ashby, YC Work-at-a-Startup, Hacker News, SimplifyJobs
+  and We Work Remotely (RSS)** are implemented as job sources. LinkedIn, Indeed,
+  Naukri, Internshala, FlexJobs and similar restricted portals are registered as
+  `manual_import_only` / `requires_permission` — they are never auto-scraped, and
+  are handled through manual import or (when Gmail is authorized) job-alert
+  ingestion. A registered source is not automatically an active source.
 - **Cross-board dedup collapses on company+title+location**, so two genuinely
   different same-title roles at one company/location link together.
 - The current boards skew senior and US/EU, so the genuinely actionable junior
@@ -393,14 +396,38 @@ python -m automatejob firecrawl alexandria ycombinator-com companies/job_search 
   Provider calls that fail without a reported charge are conservatively
   reserved as `unknown`.
 - **Recruiter posts are only as good as the text imported.** The extractor
-  surfaces explicit bulleted roles and syntactically valid emails; it never
-  invents a recruiter, company, date or hiring intent. An empty provider result
-  is reported as empty, not back-filled.
+  surfaces explicit bulleted roles and application emails/URLs (emails only when
+  an application-action phrase is present); it never invents a recruiter,
+  company, date or hiring intent. An empty provider result is reported as empty,
+  not back-filled.
 - **Gmail and Apollo integrations are adapter-only until credentials are
   supplied.** Draft creation and sending are hard-gated; no email is sent by
   this tool without explicit per-message approval.
-- **The 2,600 speculative company leads are research candidates**, not
-  outreach-ready prospects. They are never labelled as hiring.
+- **The speculative company leads are research candidates**, not outreach-ready
+  prospects. They are never labelled as hiring.
+
+## Source registry & 48-hour freshness
+
+`registry` lists every discovery source with an honest `status` (active/paused/
+unsupported) and `integration_status` (active_api / active_rss /
+active_public_scrape / active_authorized_provider / email_alert_ingestion /
+manual_import_only / requires_permission / unsupported …). A source that cannot
+be legally or technically automated is registered as manual/permission-required
+— never silently skipped or falsely marked active.
+
+`freshness.py` applies 48-hour freshness rules across jobs and recruiter posts,
+keeping six timestamps independent (`published_at`, `first_seen_at`,
+`last_seen_at`, `last_verified_at`, `source_updated_at`, `collected_at`) so
+publication time is never conflated with collection or verification time. The
+dashboard shows each job's published / first-seen / last-seen / last-verified
+times plus a 48-hour freshness badge (`newly_posted`, `recently_verified`,
+`verification_overdue`, `status_uncertain`, `closed`). A network error, 403 or
+timeout never proves a job is closed.
+
+`discovery-run --dry-run` prints the bounded 33-operation daily plan;
+`discovery-log` shows per-operation accounting (source, access method, query,
+outcome, returned/new/duplicate counts, Firecrawl credits). Restricted sources
+are recorded but never auto-executed.
 
 ## Data & privacy
 
