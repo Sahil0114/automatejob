@@ -96,6 +96,12 @@ _MIGRATIONS = [
     ("freshness", "TEXT NOT NULL DEFAULT 'fresh'"),
     ("freshness_note", "TEXT NOT NULL DEFAULT ''"),
     ("freshness_checked_at", "TEXT NOT NULL DEFAULT ''"),
+    # Phase 10 freshness foundation: separate publication, observation and
+    # verification timestamps so "newly posted" and "recently verified" are
+    # never conflated. Enforcement lands in Phase 10.
+    ("last_verified_at", "TEXT NOT NULL DEFAULT ''"),
+    ("source_updated_at", "TEXT NOT NULL DEFAULT ''"),
+    ("collected_at", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 _COLUMNS = (
@@ -369,16 +375,20 @@ class Storage:
         """
         if status not in ("fresh", "needs_verification", "stale"):
             raise ValueError(f"invalid freshness status {status!r}")
+        now = self._now()
+        # A live verification stamps last_verified_at; source_updated_at is
+        # reserved for a source-side change signal. Never conflated.
         try:
             job_id = int(url)
             cur = self.conn.execute(
-                "UPDATE jobs SET freshness=?, freshness_note=?, freshness_checked_at=? "
-                "WHERE id=?", (status, note, self._now(), job_id))
+                "UPDATE jobs SET freshness=?, freshness_note=?, freshness_checked_at=?, "
+                "last_verified_at=? WHERE id=?",
+                (status, note, now, now, job_id))
         except ValueError:
             cur = self.conn.execute(
-                "UPDATE jobs SET freshness=?, freshness_note=?, freshness_checked_at=? "
-                "WHERE url=? OR apply_url=? OR url_normalized=?",
-                (status, note, self._now(), url, url, url))
+                "UPDATE jobs SET freshness=?, freshness_note=?, freshness_checked_at=?, "
+                "last_verified_at=? WHERE url=? OR apply_url=? OR url_normalized=?",
+                (status, note, now, now, url, url, url))
         self.conn.commit()
         return cur.rowcount
 

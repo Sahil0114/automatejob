@@ -32,6 +32,61 @@ Daily reports land in `reports/` (git-ignored).
 ## Requirements
 
 - Python ≥ 3.10 (standard library plus `requests`).
+- Optional: `firecrawl` CLI (own account, own credential store) for search/scrape/map/crawl and Alexandria provider calls.
+
+## Architecture
+
+```
+                    ┌─────────────────────────── config.toml ───────────────────────────┐
+                    │  public ATS boards · YC WaaS slugs · HN / SimplifyJobs · Firecrawl  │
+                    └────────────────────────────────────────────────────────────────────┘
+                                              │
+        ┌─────────────────────────────────────┼─────────────────────────────────────┐
+        │ sources/                            │                                     │
+        │  greenhouse.py lever.py ashby.py   │  hn.py  simplifyjobs.py  yc_waas.py  │
+        │  company_sources.py                 │                                     │
+        └─────────────────────────────────────┼─────────────────────────────────────┘
+                                              ▼
+                          collector.py  →  models.Job (normalized)
+                                              │
+        ┌─────────────────────────────────────┼─────────────────────────────────────┐
+        │ eligibility.py → seniority.py → role_family.py → qualification.py        │
+        │  (hard gates: location · experience · role family · qualification)        │
+        └─────────────────────────────────────┼─────────────────────────────────────┘
+                                              ▼
+                              storage.py  →  data/jobs.db  (dedup, change, freshness)
+                                              │
+        ┌─────────────────────────────────────┼─────────────────────────────────────┐
+        ▼                                     ▼                                     ▼
+   scoring.py → shortlist            company.py / discovery.py            outreach.py
+   (actionable / relocation /        → data/companies.db                 → data/outreach.db
+    review / needs_verification /                                           (companies, contacts,
+    excluded / closed)                                                     drafts, follow-ups,
+                                                                          applications, audit)
+                                              │
+                                              ▼
+                              dashboard.py  (localhost, session auth)  +  workflow.py (manual enrichment)
+                                              │
+                                              ▼
+                        email_draft.py (deterministic drafts)  →  gmail.py (drafts only; sending hard-gated)
+                                              │
+                                              ▼
+                              firecrawl.py (optional)  →  Firecrawl CLI  →  data/firecrawl.db (budget ledger)
+```
+
+**Data flow, end to end**
+
+1. `collect` pulls permitted public feeds → normalizes to `Job` → runs the four
+   hard gates → scores → upserts into `data/jobs.db` with first/last-seen,
+   content hash and freshness timestamps.
+2. `discover` / `companies` build the company registry (`data/companies.db`)
+   with verified domain, ATS type, office locations and source URLs.
+3. `outreach` (`data/outreach.db`) tracks companies → contacts → drafts →
+   approvals → applications → follow-ups, append-only, with an audit table.
+4. `dashboard` renders a mobile-first review queue; **nothing sends without an
+   explicit per-message approval and `--enable-send`**.
+5. `firecrawl` is opt-in. Every call reserves credits against a local ledger
+   *before* execution and is refused above the hard budget.
 
 ## CLI
 
@@ -79,6 +134,26 @@ python -m automatejob <command> [options]
   ats <name> [domain]  detect + validate a company's ATS board (live)
 
   profile              show the verified candidate profile + unverified fields
+
+  dashboard            run the localhost review dashboard (mobile-first)
+  contact              add / list / CSV-import contacts (manual enrichment)
+  verify-job <url|id>  mark a listing fresh / needs_verification / stale
+
+  firecrawl            optional Firecrawl CLI wrapper (budget-guarded)
+    usage              account balance + local ledger
+    auth               CLI authentication status
+    search <q>         bounded web search (--limit, --sources)
+    scrape <url>       scrape one URL (--formats)
+    map <url>          map URLs on a site (--search)
+    crawl <url>        bounded crawl (--limit, --max-depth, --path)
+    alexandria <provider> <capability> --options '{...}' --provider-cost N
+  recruiter            import a recruiter post; extracts explicit roles/emails
+    --url URL --text '…' | --file PATH
+
+  registry             show the source registry (active / paused / unsupported)
+
+  gmail-auth / gmail-sync   Gmail OAuth setup / read-only reply sync
+  linkedin ...        LinkedIn note drafts (never automated actions)
 
 Global: -c/--config PATH, -v/-vv for logging
 ```
@@ -251,12 +326,52 @@ bash /home/sahil/Work/automatejob/scripts/collect.sh
 python -m unittest discover -s tests
 ```
 
-85 tests cover normalization, dedup, scoring, eligibility (Mumbai vs Bengaluru,
+The suite covers normalization, dedup, scoring, eligibility (Mumbai vs Bengaluru,
 India-remote, ambiguous remote, foreign cities), role-family classification
 (20+ adversarial titles), seniority (junior/graduate/intermediate/senior/lead/
 review, "Software Engineer 3", L-levels), the actionable gate, HTML→text,
-source failures, Ashby/GH/Lever parsing, closure/change tracking, and
-cross-board duplicates.
+source failures, Ashby/GH/Lever parsing, closure/change tracking,
+cross-board duplicates, company discovery, outreach pipeline, deterministic
+drafts, Gmail/Apollo adapters, freshness gating, Firecrawl budget guards,
+recruiter-post extraction and the source registry.
+
+## Firecrawl usage
+
+The Python app **never stores a Firecrawl key**. Authentication is done once
+through the official CLI, which keeps credentials in its own store:
+
+```bash
+npm install -g firecrawl-cli
+firecrawl login                 # browser sign-in
+firecrawl setup mcp --agent hermes-agent --keyless --yes
+```
+
+Then check and use it through the budget-guarded wrapper:
+
+```bash
+python -m automatejob firecrawl usage
+python -m automatejob firecrawl search "junior software engineer Mumbai remote" --limit 5
+python -m automatejob firecrawl scrape "https://example.com/careers" --formats markdown
+python -m automatejob firecrawl map "https://example.com" --search careers
+python -m automatejob firecrawl crawl "https://example.com/careers" --limit 10 --max-depth 1
+python -m automatejob firecrawl alexandria ycombinator-com companies/job_search \
+    --options '{"query":"junior software engineer","page_size":5,"remote_only":true}' \
+    --provider-cost 5
+```
+
+**Budget rules (local, conservative):**
+
+- Default monthly budget **1000 credits**, soft limit 700, hard limit 800,
+  absolute ceiling 1000. Every mutating call **reserves** credits before
+  execution and is refused once the hard limit is reached.
+- `--provider-cost` is **required** for Alexandria calls. Read it from the
+  provider contract (`firecrawl list jobs <provider> --include-costs`); never
+  guess it.
+- `allow_payg` defaults to **off**; pay-as-you-go must be enabled explicitly.
+- The local ledger is an estimate. `firecrawl usage` shows the authoritative
+  account balance alongside it.
+- A provider call that fails without reporting a charge is reserved as
+  `unknown` so a retry cannot silently exceed the budget.
 
 ## Limitations
 
@@ -266,14 +381,30 @@ cross-board duplicates.
   roles with no stated experience. We do not guess.
 - **Foreign detection is city/country-list based.** Uncommon cities may leak
   into needs_verification (conservatively, never into the shortlist).
-- **Only Greenhouse, Lever and Ashby** are implemented; Workday/Jobvite/
-  LinkedIn/Indeed have no public API.
+- **Only Greenhouse, Lever, Ashby, YC Work-at-a-Startup, Hacker News and
+  SimplifyJobs** are implemented as job sources; Workday/Jobvite/LinkedIn/
+  Indeed have no public API. LinkedIn enrichment is explicitly unsupported.
 - **Cross-board dedup collapses on company+title+location**, so two genuinely
   different same-title roles at one company/location link together.
 - The current boards skew senior and US/EU, so the genuinely actionable junior
   India-eligible list is short by design — that is expected, not a bug.
+- **Firecrawl credits are metered locally and are only an estimate.** The local
+  ledger is not authoritative; the account balance from `firecrawl usage` is.
+  Provider calls that fail without a reported charge are conservatively
+  reserved as `unknown`.
+- **Recruiter posts are only as good as the text imported.** The extractor
+  surfaces explicit bulleted roles and syntactically valid emails; it never
+  invents a recruiter, company, date or hiring intent. An empty provider result
+  is reported as empty, not back-filled.
+- **Gmail and Apollo integrations are adapter-only until credentials are
+  supplied.** Draft creation and sending are hard-gated; no email is sent by
+  this tool without explicit per-message approval.
+- **The 2,600 speculative company leads are research candidates**, not
+  outreach-ready prospects. They are never labelled as hiring.
 
 ## Data & privacy
 
 Job data is stored locally in `data/jobs.db` only. No data leaves your machine
-except the outbound HTTPS requests to the public job-board APIs.
+except the outbound HTTPS requests to the public job-board APIs. Credentials
+(Firecrawl, Gmail) live in their own secure stores and are never written to
+this repository.

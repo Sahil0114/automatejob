@@ -209,6 +209,43 @@ CREATE TABLE IF NOT EXISTS job_applications (
     created_at       TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_applications_company ON job_applications(company_id);
+CREATE TABLE IF NOT EXISTS recruiter_posts (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    dedup_key        TEXT UNIQUE NOT NULL,
+    original_url     TEXT NOT NULL,
+    source_type      TEXT NOT NULL DEFAULT 'manual',
+    raw_text         TEXT NOT NULL DEFAULT '',
+    company          TEXT NOT NULL DEFAULT '',
+    recruiter_name   TEXT NOT NULL DEFAULT '',
+    recruiter_title  TEXT NOT NULL DEFAULT '',
+    recruiter_linkedin_url TEXT NOT NULL DEFAULT '',
+    published_at     TEXT NOT NULL DEFAULT '',
+    collected_at     TEXT NOT NULL,
+    last_verified_at TEXT NOT NULL DEFAULT '',
+    confidence       REAL NOT NULL DEFAULT 0,
+    status           TEXT NOT NULL DEFAULT 'unverified',
+    evidence         TEXT NOT NULL DEFAULT '{}'
+);
+CREATE TABLE IF NOT EXISTS recruiter_post_roles (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_id          INTEGER NOT NULL,
+    title            TEXT NOT NULL,
+    location         TEXT NOT NULL DEFAULT '',
+    experience       TEXT NOT NULL DEFAULT '',
+    technical_requirements TEXT NOT NULL DEFAULT '[]',
+    salary           TEXT NOT NULL DEFAULT '',
+    deadline         TEXT NOT NULL DEFAULT '',
+    application_url  TEXT NOT NULL DEFAULT '',
+    published_email  TEXT NOT NULL DEFAULT '',
+    status           TEXT NOT NULL DEFAULT 'unverified'
+);
+CREATE TABLE IF NOT EXISTS recruiter_post_emails (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_id          INTEGER NOT NULL,
+    email            TEXT NOT NULL,
+    verification_status TEXT NOT NULL DEFAULT 'published',
+    UNIQUE(post_id, email)
+);
 """
 
 # Outbound message states (kept distinct from Gmail draft states).
@@ -718,6 +755,80 @@ class OutreachStorage:
     def list_applications(self) -> List[dict]:
         return [dict(r) for r in self.conn.execute(
             "SELECT * FROM job_applications ORDER BY applied_at DESC").fetchall()]
+
+    # -- recruiter posts -----------------------------------------------------
+    def upsert_recruiter_post(self, post) -> int:
+        """Insert/update a recruiter post idempotently by original URL.
+
+        Roles and published emails are replaced on update; nothing is deleted
+        from history. Unknown fields remain empty rather than inferred.
+        """
+        import hashlib
+        import json as _json
+        dedup = hashlib.sha256((post.original_url or post.text[:200]).encode()).hexdigest()
+        existing = self.conn.execute(
+            "SELECT id FROM recruiter_posts WHERE dedup_key=?", (dedup,)).fetchone()
+        now = _now()
+        if existing:
+            post_id = existing["id"]
+            self.conn.execute(
+                "UPDATE recruiter_posts SET raw_text=?, company=?, recruiter_name=?, "
+                "recruiter_title=?, recruiter_linkedin_url=?, published_at=?, source_type=?, "
+                "confidence=?, last_verified_at=? WHERE id=?",
+                (post.text, post.company, post.recruiter_name, post.recruiter_title,
+                 post.recruiter_linkedin_url, post.published_at, post.source_type,
+                 post.confidence, now, post_id))
+            self.conn.execute("DELETE FROM recruiter_post_roles WHERE post_id=?", (post_id,))
+            self.conn.execute("DELETE FROM recruiter_post_emails WHERE post_id=?", (post_id,))
+        else:
+            cur = self.conn.execute(
+                "INSERT INTO recruiter_posts (dedup_key,original_url,source_type,raw_text,company,"
+                "recruiter_name,recruiter_title,recruiter_linkedin_url,published_at,collected_at,"
+                "last_verified_at,confidence,status,evidence) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (dedup, post.original_url, post.source_type, post.text, post.company,
+                 post.recruiter_name, post.recruiter_title, post.recruiter_linkedin_url,
+                 post.published_at, now, now, post.confidence, "unverified",
+                 _json.dumps({"source_url": post.original_url})))
+            post_id = int(cur.lastrowid or 0)
+        for role in post.roles:
+            self.conn.execute(
+                "INSERT INTO recruiter_post_roles (post_id,title,location,experience,"
+                "technical_requirements,salary,deadline,application_url,published_email,status) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (post_id, role.title, role.location, role.experience,
+                 _json.dumps(role.technical_requirements), role.salary, role.deadline,
+                 role.application_url, role.published_email, "unverified"))
+        for email in post.published_emails:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO recruiter_post_emails (post_id,email,verification_status) "
+                "VALUES (?,?,?)", (post_id, email, "published"))
+        self.conn.commit()
+        return post_id
+
+    def set_recruiter_post_status(self, post_id: int, status: str, note: str = "") -> bool:
+        if status not in ("unverified", "verified", "irrelevant", "expired", "applied"):
+            raise ValueError(f"invalid recruiter post status {status!r}")
+        cur = self.conn.execute(
+            "UPDATE recruiter_posts SET status=? WHERE id=?", (status, post_id))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def list_recruiter_posts(self, status: Optional[str] = None) -> List[dict]:
+        sql = "SELECT * FROM recruiter_posts"
+        params = []
+        if status:
+            sql += " WHERE status=?"
+            params.append(status)
+        sql += " ORDER BY collected_at DESC"
+        out = []
+        for row in self.conn.execute(sql, params).fetchall():
+            d = dict(row)
+            d["roles"] = [dict(r) for r in self.conn.execute(
+                "SELECT * FROM recruiter_post_roles WHERE post_id=? ORDER BY id", (d["id"],)).fetchall()]
+            d["published_emails"] = [r["email"] for r in self.conn.execute(
+                "SELECT email FROM recruiter_post_emails WHERE post_id=? ORDER BY id", (d["id"],)).fetchall()]
+            out.append(d)
+        return out
 
     # -- metrics -------------------------------------------------------------
     def metrics(self) -> dict:

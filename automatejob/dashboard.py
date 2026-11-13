@@ -279,6 +279,12 @@ class Dashboard:
             self._send(handler, self._jobs())
         elif path == "/api/jobs/verify" and method == "POST":
             self._verify_job(handler)
+        elif path == "/api/recruiter-posts":
+            self._send(handler, self.outreach.list_recruiter_posts())
+        elif path == "/api/recruiter-posts/import" and method == "POST":
+            self._import_recruiter_post(handler)
+        elif path.startswith("/api/recruiter-posts/") and method == "POST":
+            self._recruiter_post_status(handler, path)
         elif path == "/api/linkedin":
             self._send(handler, self.outreach.list_linkedin_tasks())
         elif path.startswith("/api/linkedin/") and method == "POST":
@@ -457,6 +463,41 @@ class Dashboard:
                             sending_enabled=self.sending_enabled)
         self._send(handler, result, 200 if result.get("ok") else 200)
 
+    def _import_recruiter_post(self, handler):
+        from .recruiter import parse_recruiter_post
+        body = self._body(handler)
+        text = body.get("text", "")
+        url = body.get("original_url", "")
+        if not text or not url:
+            self._send(handler, {"error": "text and original_url are required"}, 400)
+            return
+        post = parse_recruiter_post(
+            text, original_url=url, company=body.get("company", ""),
+            published_at=body.get("published_at", ""),
+            source_type=body.get("source_type", "manual"))
+        post.recruiter_name = body.get("recruiter_name", "")
+        post.recruiter_title = body.get("recruiter_title", "")
+        post.recruiter_linkedin_url = body.get("recruiter_linkedin_url", "")
+        post_id = self.outreach.upsert_recruiter_post(post)
+        self._send(handler, {"post_id": post_id, "roles": len(post.roles),
+                             "published_emails": post.published_emails,
+                             "confidence": post.confidence})
+
+    def _recruiter_post_status(self, handler, path):
+        try:
+            post_id = int(path.rsplit("/", 2)[-2])
+        except (ValueError, IndexError):
+            self._send(handler, {"error": "bad id"}, 400)
+            return
+        body = self._body(handler)
+        status = body.get("status", "")
+        try:
+            ok = self.outreach.set_recruiter_post_status(post_id, status, body.get("note", ""))
+        except ValueError as exc:
+            self._send(handler, {"error": str(exc)}, 400)
+            return
+        self._send(handler, {"ok": ok}, 200 if ok else 404)
+
     def _activity(self) -> list:
         return [dict(r) for r in self.outreach.conn.execute(
             "SELECT * FROM audit_events ORDER BY id DESC LIMIT 50").fetchall()]
@@ -496,6 +537,7 @@ if(r.ok)location.href='/';else alert('invalid token');}}
 <div class="tabs" id="tabs">
 <button class="on" data-t="jobs">Jobs</button><button data-t="companies">Companies</button>
 <button data-t="contacts">Contacts</button><button data-t="drafts">Drafts</button>
+<button data-t="recruiter">Recruiter Posts</button>
 <button data-t="followups">Follow-ups</button><button data-t="linkedin">LinkedIn</button>
 <button data-t="activity">Activity</button><button data-t="analytics">Analytics</button>
 <button onclick="logout()">Log out</button></div>
@@ -514,6 +556,7 @@ if(t==='jobs'){{const d=await get('/api/jobs');v.innerHTML='<h2>Relevant jobs ('
 else if(t==='companies'){{const d=await get('/api/companies');v.innerHTML='<h2>Companies ('+(d.length)+')</h2>'+d.map(c=>'<div class="card">'+tag(c.qualification)+'<b>'+esc(c.name)+'</b> <span class="small">'+esc(c.domain)+'</span><div class="small">'+esc(c.state)+' · score '+Math.round(c.score||0)+'</div><div class="small"><b>Next:</b> '+esc(c.suggested_next_action)+'</div><h3>Research evidence</h3>'+((c.evidence||[]).map(e=>'<div class="small">'+tag(e.kind)+' '+esc(e.fact)+' <a href="'+esc(e.url)+'" target="_blank">source</a> · '+esc(e.observed_at)+'</div>').join('')||'<div class="small">No sourced evidence yet.</div>')+'<h3>Current vacancies</h3>'+((c.jobs||[]).map(j=>'<div class="small">'+tag(j.freshness)+'<a href="'+esc(j.url)+'" target="_blank">'+esc(j.title)+'</a> · '+esc(j.location)+' · '+esc(j.seniority)+(j.actionable?' · actionable':'')+'</div>').join('')||'<div class="small">No matching stored open role.</div>')+'<h3>Contacts</h3>'+((c.contacts||[]).map(x=>'<div class="small">'+tag(x.email_status)+'<b>'+esc(x.full_name)+'</b> · '+esc(x.title)+' '+(x.linkedin_url?'<a href="'+esc(x.linkedin_url)+'" target="_blank">profile</a>':'')+(x.email?' · '+esc(x.email):' · email needed')+'</div>').join('')||'<div class="small">No verified public contact recorded.</div>')+'<button onclick="openContact(\\''+esc(c.company_id)+'\\')">Add contact / email</button></div>').join('')}}
 else if(t==='contacts'){{const d=await get('/api/contacts');v.innerHTML='<h2>Contacts ('+(d.length)+')</h2>'+d.map(c=>'<div class="card">'+tag(c.email_status)+'<b>'+esc(c.full_name)+'</b> <span class="small">'+esc(c.title)+'</span><div class="small">'+esc(c.company_name||'')+' · '+(c.linkedin_url?'<a href="'+esc(c.linkedin_url)+'" target="_blank">profile</a>':'no profile')+' · '+(c.email?esc(c.email):'email needed')+'</div><div class="small">email source: '+esc(c.source_url||'manual / not recorded')+'</div></div>').join('')+addContactForm()}}
 else if(t==='drafts'){{const d=await get('/api/drafts');v.innerHTML='<h2>Drafts ('+(d.length)+')</h2>'+d.map(x=>'<div class="card"><span class="small">#'+x.id+'</span> '+tag(x.state)+' '+tag(x.draft_type)+'<label>Subject</label><input id="subj-'+x.id+'" value="'+esc(x.subject)+'"><label>Message</label><textarea id="body-'+x.id+'" rows="12">'+esc(x.body)+'</textarea><button class="dim" onclick="editDraft('+x.id+')">Save edits</button><button onclick="act('+x.id+',\'approve\')">Approve</button><button class="dim" onclick="act('+x.id+',\'save_gmail\')">Save Gmail draft</button><button class="dim" onclick="act('+x.id+',\'send\')">Send…</button><button class="dim" onclick="act('+x.id+',\'mark_sent\')">Mark sent manually</button><button class="danger" onclick="act('+x.id+',\'reject\')">Reject</button></div>').join('')}}
+else if(t==='recruiter'){{const d=await get('/api/recruiter-posts');v.innerHTML='<h2>Recruiter posts ('+(d.length)+')</h2>'+d.map(p=>'<div class="card">'+tag(p.status)+'<b>'+esc(p.company||'(company unknown)')+'</b> <span class="small">'+esc(p.recruiter_name||'recruiter not identified')+(p.recruiter_title?' · '+esc(p.recruiter_title):'')+'</span><div class="small">published '+esc(p.published_at||'unknown')+' · verified '+esc(p.last_verified_at||'never')+' · <a href="'+esc(p.original_url)+'" target="_blank">original post</a></div>'+((p.roles||[]).map(r=>'<div class="small">• '+esc(r.title)+(r.location?' — '+esc(r.location):'')+(r.experience?' · '+esc(r.experience):'')+'</div>').join('')||'<div class="small">No roles extracted.</div>')+(p.published_emails&&p.published_emails.length?'<div class="small">Published emails: '+esc(p.published_emails.join(', '))+'</div>':'')+'<button class="dim" onclick="postStatus('+p.id+',\'verified\')">Verify</button><button class="dim" onclick="postStatus('+p.id+',\'applied\')">Mark applied</button><button class="dim" onclick="postStatus('+p.id+',\'expired\')">Expired</button><button class="danger" onclick="postStatus('+p.id+',\'irrelevant\')">Irrelevant</button></div>').join('')+recruiterForm()}}
 else if(t==='followups'){{const d=await get('/api/followups');v.innerHTML='<h2>Follow-ups due ('+(d.length)+')</h2>'+d.map(f=>'<div class="card">'+tag('pending')+'#<b>'+f.followup_number+'</b> due '+esc(f.due_on)+'<div class="small">'+esc(f.reason)+'</div></div>').join('')}}
 else if(t==='linkedin'){{const d=await get('/api/linkedin');v.innerHTML='<h2>LinkedIn queue ('+(d.length)+')</h2>'+d.map(t2=>'<div class="card">'+tag(t2.status)+'<b>'+esc(t2.profile_url)+'</b><pre>'+esc(t2.connection_note)+'</pre><div class="small">'+esc(t2.next_action)+'</div></div>').join('')}}
 else if(t==='activity'){{const d=await get('/api/activity');v.innerHTML='<h2>Recent activity</h2>'+d.map(a=>'<div class="card"><span class="small">'+esc(a.at)+'</span> '+tag(a.entity)+' '+esc(a.entity_id)+' <b>'+esc(a.from_state)+'→'+esc(a.to_state)+'</b></div>').join('')}}
@@ -533,6 +576,15 @@ if(r.warnings&&r.warnings.length)alert('Warnings:\\n'+r.warnings.join('\\n'));
 if(r.draft_id){{alert((r.draft_already_exists?'Existing':'New')+' draft #'+r.draft_id+' is ready for review.');show('drafts')}}else show('contacts')}}
 async function editDraft(id){{const r=await post('/api/drafts/'+id+'/edit',{{subject:$('#subj-'+id).value,body:$('#body-'+id).value}});if(!r.ok)alert(JSON.stringify(r));show('drafts')}}
 async function openContact(companyId){{await show('contacts');$('#c_company').value=companyId;$('#c_name').focus()}}
+function recruiterForm(){{return '<div class="card"><h2>Import recruiter post</h2>'+
+'<label>Original post URL</label><input id="r_url" placeholder="https://…">'+
+'<label>Company (only if the post states it)</label><input id="r_company">'+
+'<label>Recruiter name / title (only if published)</label><input id="r_name"><input id="r_title">'+
+'<label>Published date (YYYY-MM-DD, only if shown)</label><input id="r_date">'+
+'<label>Post text</label><textarea id="r_text" rows="10"></textarea>'+
+'<button onclick="saveRecruiterPost()">Import & extract</button></div>'}}
+async function saveRecruiterPost(){{const r=await post('/api/recruiter-posts/import',{{original_url:$('#r_url').value,company:$('#r_company').value,recruiter_name:$('#r_name').value,recruiter_title:$('#r_title').value,published_at:$('#r_date').value,text:$('#r_text').value,source_type:'manual'}});alert(JSON.stringify(r));show('recruiter')}}
+async function postStatus(id,status){{const r=await post('/api/recruiter-posts/'+id+'/status',{{status:status}});alert(JSON.stringify(r));show('recruiter')}}
 async function verifyJob(url,status){{const note=status==='fresh'?'re-verified against employer source':(prompt('Reason for '+status+'? (optional)','')||'');const r=await post('/api/jobs/verify',{{url:url,status:status,note:note}});alert(JSON.stringify(r));show('jobs')}}
 async function act(id,a){{if(a==='send'){{if(!confirm('Send this message? This sends real email.'))return;const r=await post('/api/drafts/'+id+'/send',{{confirm:true}});alert(JSON.stringify(r))}}
 else{{const r=await post('/api/drafts/'+id+'/'+a,{{}});alert(JSON.stringify(r))}}

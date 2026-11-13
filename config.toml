@@ -176,6 +176,17 @@ cities = ["mumbai", "thane", "navi mumbai", "new bombay"]
 # Other Indian cities go to a separate relocation queue (not the shortlist).
 relocation = true
 
+# ---- Firecrawl (optional; credentials stay in the CLI's secure store) ----
+
+[firecrawl]
+enabled = true
+monthly_budget = 1000
+soft_limit = 700
+hard_limit = 800
+absolute_limit = 1000
+allow_payg = false
+search_results_default = 10
+
 # ---- change/closure tracking ----------------------------------------------
 
 [tracking]

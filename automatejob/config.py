@@ -63,6 +63,19 @@ class EligibilityConfig:
 
 
 @dataclass
+class FirecrawlSettings:
+    """Firecrawl CLI integration settings (no credential values here)."""
+    enabled: bool = True
+    monthly_budget: int = 1000
+    soft_limit: int = 700
+    hard_limit: int = 800
+    absolute_limit: int = 1000
+    allow_payg: bool = False
+    search_results_default: int = 10
+    db_path: str = "data/firecrawl.db"
+
+
+@dataclass
 class AppConfig:
     sources: List[SourceConfig]
     roles: List[RoleConfig]
@@ -78,6 +91,7 @@ class AppConfig:
     list_limit: int = 20
     close_after_scans: int = 2
     user_agent: str = DEFAULT_USER_AGENT
+    firecrawl: FirecrawlSettings = field(default_factory=FirecrawlSettings)
 
     @classmethod
     def load(cls, path: str | Path) -> "AppConfig":
@@ -130,6 +144,10 @@ class AppConfig:
             locations=locations,
             scoring=scoring,
             eligibility=eligibility,
+            firecrawl=FirecrawlSettings(**{
+                k: v for k, v in raw.get("firecrawl", {}).items()
+                if k in FirecrawlSettings.__dataclass_fields__
+            }),
             db_path=database.get("path", "data/jobs.db"),
             companies_path=raw.get("companies", {}).get("path", "data/companies.toml"),
             companies_db_path=raw.get("companies", {}).get("db", "data/companies.db"),

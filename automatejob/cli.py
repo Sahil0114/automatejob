@@ -15,7 +15,7 @@ from .collector import Collector
 from .companies import CompanyRegistry
 from .company import CompanyStorage
 from .company_scoring import outreach_readiness
-from .config import AppConfig
+from .config import AppConfig, FirecrawlSettings
 from .discovery import CompanyDiscovery
 from .email_draft import DRAFT_TYPES, draft_email
 from .gmail import GmailAdapter, GmailConfig
@@ -589,6 +589,173 @@ def cmd_dashboard(cfg: AppConfig, args) -> int:
     return 0
 
 
+def _firecrawl_client(cfg: AppConfig):
+    from .firecrawl import FirecrawlBudget, FirecrawlCLI, FirecrawlConfig
+    settings = cfg.firecrawl
+    budget = FirecrawlBudget(settings.db_path, FirecrawlConfig(
+        enabled=settings.enabled, monthly_budget=settings.monthly_budget,
+        soft_limit=settings.soft_limit, hard_limit=settings.hard_limit,
+        absolute_limit=settings.absolute_limit,
+        search_results_default=settings.search_results_default,
+        db_path=settings.db_path))
+    return budget, FirecrawlCLI(budget)
+
+
+def cmd_firecrawl(cfg: AppConfig, args) -> int:
+    from .firecrawl import BudgetExceeded
+    budget, client = _firecrawl_client(cfg)
+    try:
+        if args.action == "usage":
+            account = client.account_usage()
+            local = budget.usage()
+            print("Firecrawl usage")
+            print(f"  account source:      {account.get('source')}")
+            if account.get("available"):
+                print(f"  account remaining:   {account.get('remaining')} "
+                      f"(plan {account.get('plan', '')})")
+                print(f"  account used:        {account.get('used')}")
+            else:
+                print("  account remaining:   unknown (CLI usage API unavailable)")
+            print(f"  local monthly usage: {local['monthly_consumed']:g} "
+                  f"(estimated, not authoritative)")
+            print(f"  local daily usage:   {local['daily_consumed']:g}")
+            print(f"  budget limit:        {local['budget_limit']:g}")
+            print(f"  budget remaining:    {local['budget_remaining']:g}")
+            print(f"  soft limit:          {local['soft_limit']:g}")
+            print(f"  paused at hard limit:{local['paused']}")
+            print(f"  by endpoint:         {local['by_endpoint'] or '{}'}")
+            print(f"  by provider:         {local['by_provider'] or '{}'}")
+            return 0
+
+        if args.action == "auth":
+            print(f"authenticated: {client.auth_status()['authenticated']}")
+            return 0
+
+        if args.action == "search":
+            data = client.search(args.query, limit=args.limit, sources=args.sources)
+            urls = [r.get("url") for r in (data.get("data", {}).get("web") or [])]
+            print(f"search returned {len(urls)} result(s) "
+                  f"({'cached' if data.get('cached') else 'live'})")
+            for url in urls:
+                print(f"  {url}")
+            return 0
+
+        if args.action == "scrape":
+            data = client.scrape(args.url, formats=args.formats)
+            print(f"scrape {'cached' if data.get('cached') else 'completed'}")
+            return 0
+
+        if args.action == "map":
+            data = client.map(args.url, search=args.search or "")
+            print(f"map {'cached' if data.get('cached') else 'completed'}")
+            return 0
+
+        if args.action == "crawl":
+            data = client.crawl(args.url, limit=args.limit, max_depth=args.max_depth,
+                                path_pattern=args.path or "")
+            print(f"crawl completed (limit={args.limit}, depth={args.max_depth})")
+            return 0
+
+        if args.action == "alexandria":
+            if args.provider_cost is None:
+                print("error: --provider-cost is required (read it from the provider contract)")
+                return 2
+            data = client.alexandria(args.provider, args.capability,
+                                     json.loads(args.options or "{}"),
+                                     provider_cost=float(args.provider_cost),
+                                     cache_ttl_seconds=int(args.cache_ttl or 0))
+            print(f"alexandria {args.provider}/{args.capability} completed "
+                  f"({'cached' if data.get('cached') else 'live'})")
+            return 0
+
+        print(f"unknown firecrawl action {args.action!r}")
+        return 2
+    except BudgetExceeded as exc:
+        print(f"Budget guard blocked the request: {exc}")
+        return 3
+    except RuntimeError as exc:
+        print(f"Firecrawl request failed: {exc}")
+        return 1
+    finally:
+        budget.close()
+
+
+def cmd_registry(cfg: AppConfig, args) -> int:
+    """Show the source registry (statuses are explicit; unsupported != active)."""
+    from .source_registry import SourceRegistry
+    reg = SourceRegistry("data/source_registry.db")
+    try:
+        if args.refresh:
+            _seed_source_registry(reg)
+        rows = reg.list_all()
+        if not rows:
+            _seed_source_registry(reg)
+            rows = reg.list_all()
+        for r in rows:
+            print(f"{r['status']:11s} {r['name']:16s} {r['source_type']:12s} "
+                  f"{r['classification']:8s} auth={bool(r['auth_required'])} "
+                  f"perm={r['permission']}")
+            if r["last_successful_at"]:
+                print(f"             last ok {r['last_successful_at']} "
+                      f"verified={r['last_verified_records']} errors={r['error_count']}")
+        return 0
+    finally:
+        reg.close()
+
+
+def _seed_source_registry(reg) -> None:
+    """Seed known sources with honest status (never mark unsupported active)."""
+    from .source_registry import SourceStatus
+    known = [
+        ("greenhouse", "greenhouse", "api", "api", False, "authorized", "", "incremental", "board rate limit", "", SourceStatus.ACTIVE),
+        ("lever", "lever", "api", "api", False, "authorized", "", "incremental", "board rate limit", "", SourceStatus.ACTIVE),
+        ("ashby", "ashby", "api", "api", False, "authorized", "", "incremental", "board rate limit", "", SourceStatus.ACTIVE),
+        ("yc_waas", "yc_waas", "browser", "browser", False, "authorized", "", "incremental", "bounded", "", SourceStatus.ACTIVE),
+        ("hn", "hn", "api", "api", False, "authorized", "", "incremental", "1 req/s", "", SourceStatus.ACTIVE),
+        ("simplifyjobs", "simplifyjobs", "browser", "browser", False, "authorized", "", "incremental", "bounded", "", SourceStatus.ACTIVE),
+        ("firecrawl", "firecrawl", "api", "api", True, "authorized", "firecrawl-cli secure store", "on demand", "account limit", "800/month hard", SourceStatus.ACTIVE),
+        ("alexandria_yc", "ycombinator-com", "api", "api", True, "authorized", "firecrawl-cli secure store", "on demand", "provider", "5/call", SourceStatus.ACTIVE),
+        ("alexandria_blitzapi", "blitzapi", "api", "api", True, "authorized", "firecrawl-cli secure store", "on demand", "provider", "2 + 10/record", SourceStatus.PAUSED),
+        ("alexandria_harvestapi", "harvestapi", "api", "api", True, "authorized", "firecrawl-cli secure store", "on demand", "provider", "2/call", SourceStatus.ACTIVE),
+        ("apollo", "apollo", "api", "api", True, "unauthorized", "", "manual", "", "", SourceStatus.UNSUPPORTED),
+        ("linkedin", "linkedin", "browser", "browser", True, "unauthorized", "", "manual", "", "", SourceStatus.UNSUPPORTED),
+    ]
+    for (name, stype, access, classification, auth, perm, cred, refresh,
+         rate, budget, status) in known:
+        reg.upsert(name, stype, access=access, classification=classification,
+                   auth_required=auth, permission=perm, credential_reference=cred,
+                   refresh_policy=refresh, rate_limit=rate, credit_budget=budget,
+                   status=status)
+
+
+def cmd_recruiter(cfg: AppConfig, args) -> int:
+    """Import a recruiter post from text/file and extract explicit roles/emails."""
+    import json as _json
+    from .recruiter import parse_recruiter_post
+    out = OutreachStorage(cfg.outreach_db_path)
+    try:
+        text = Path(args.file).read_text(encoding="utf-8") if args.file else args.text
+        if not text or not args.url:
+            print("error: --url and (--text or --file) are required")
+            return 2
+        post = parse_recruiter_post(
+            text, original_url=args.url, company=args.company or "",
+            published_at=args.published_at or "", source_type=args.source_type)
+        post.recruiter_name = args.recruiter_name or ""
+        post.recruiter_title = args.recruiter_title or ""
+        post.recruiter_linkedin_url = args.recruiter_linkedin or ""
+        post_id = out.upsert_recruiter_post(post)
+        print(f"recruiter post #{post_id} imported from {args.url}")
+        print(f"  company: {post.company or '(unknown)'}")
+        print(f"  published_at: {post.published_at or '(unknown)'}")
+        print(f"  roles: {[r.title for r in post.roles]}")
+        print(f"  published emails: {post.published_emails}")
+        print(f"  confidence: {post.confidence}")
+        return 0
+    finally:
+        out.close()
+
+
 def cmd_gmail_auth(cfg: AppConfig, args) -> int:
     """Run the user-initiated local OAuth browser flow; never called by cron."""
     import os
@@ -877,6 +1044,56 @@ def build_parser() -> argparse.ArgumentParser:
 
     pgs = sub.add_parser("gmail-sync", help="sync replies from authorized Gmail threads; never sends")
     pgs.set_defaults(func=cmd_gmail_sync)
+
+    pfc = sub.add_parser("firecrawl", help="Firecrawl CLI usage, search, scrape, map, crawl, Alexandria")
+    fsub = pfc.add_subparsers(dest="action", required=True)
+    pfcu = fsub.add_parser("usage", help="show account + local budget usage")
+    pfcu.set_defaults(func=cmd_firecrawl)
+    pfca = fsub.add_parser("auth", help="show CLI authentication status")
+    pfca.set_defaults(func=cmd_firecrawl)
+    pfcs = fsub.add_parser("search", help="run a bounded web search")
+    pfcs.add_argument("query")
+    pfcs.add_argument("--limit", type=int, default=10)
+    pfcs.add_argument("--sources", default="web")
+    pfcs.set_defaults(func=cmd_firecrawl)
+    pfcc = fsub.add_parser("scrape", help="scrape one URL")
+    pfcc.add_argument("url")
+    pfcc.add_argument("--formats", default="markdown")
+    pfcc.set_defaults(func=cmd_firecrawl)
+    pfcm = fsub.add_parser("map", help="map URLs on a site")
+    pfcm.add_argument("url")
+    pfcm.add_argument("--search", default="")
+    pfcm.set_defaults(func=cmd_firecrawl)
+    pfcw = fsub.add_parser("crawl", help="bounded crawl (limit + depth + path)")
+    pfcw.add_argument("url")
+    pfcw.add_argument("--limit", type=int, default=10)
+    pfcw.add_argument("--max-depth", type=int, default=1)
+    pfcw.add_argument("--path", default="")
+    pfcw.set_defaults(func=cmd_firecrawl)
+    pfcx = fsub.add_parser("alexandria", help="execute an Alexandria provider capability")
+    pfcx.add_argument("provider")
+    pfcx.add_argument("capability")
+    pfcx.add_argument("--options", default="{}")
+    pfcx.add_argument("--provider-cost", type=float, default=None,
+                      help="credits from the inspected provider contract (required)")
+    pfcx.add_argument("--cache-ttl", type=int, default=0)
+    pfcx.set_defaults(func=cmd_firecrawl)
+
+    prp = sub.add_parser("recruiter", help="import a recruiter post and extract explicit roles/emails")
+    prp.add_argument("--url", required=True, help="original post URL")
+    prp.add_argument("--text", default="", help="post text")
+    prp.add_argument("--file", default="", help="read post text from a file")
+    prp.add_argument("--company", default="")
+    prp.add_argument("--recruiter-name", default="")
+    prp.add_argument("--recruiter-title", default="")
+    prp.add_argument("--recruiter-linkedin", default="")
+    prp.add_argument("--published-at", default="")
+    prp.add_argument("--source-type", default="manual")
+    prp.set_defaults(func=cmd_recruiter)
+
+    prg = sub.add_parser("registry", help="show the source registry")
+    prg.add_argument("--refresh", action="store_true", help="re-seed known sources")
+    prg.set_defaults(func=cmd_registry)
 
     pc = sub.add_parser("contact", help="add/list/import contacts (manual enrichment)")
     pc.add_argument("--add", action="store_true", help="add a contact")
