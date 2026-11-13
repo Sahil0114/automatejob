@@ -13,6 +13,9 @@ data/personal.toml
 # runtime reports (daily output, last-run state)
 reports/
 
+# local agent/tooling state (never committed)
+.commandcode/
+
 # python
 __pycache__/
 *.py[cod]
@@ -42,9 +45,19 @@ htmlcov/
 *.pem
 *.p12
 secrets*
+*credentials*.json
+*token*.json
+gcp-*.json
+client_secret*.json
+service-account*.json
 
 # Gmail OAuth credentials + tokens — never commit
 *gmail-credentials*.json
 *gmail-token*.json
-*credentials*.json
-*token*.json
+
+# local captures (may contain PII/private data) — never commit
+*.png
+*.jpg
+*.jpeg
+*.webp
+*screenshot*

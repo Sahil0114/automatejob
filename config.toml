@@ -181,11 +181,12 @@ relocation = true
 [firecrawl]
 enabled = true
 monthly_budget = 1000
-soft_limit = 700
-hard_limit = 800
-absolute_limit = 1000
+warning_threshold = 650
+hard_stop_threshold = 800
+absolute_account_limit = 1000
 allow_payg = false
 search_results_default = 10
+db_path = "data/firecrawl.db"
 
 # ---- change/closure tracking ----------------------------------------------
 

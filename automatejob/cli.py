@@ -169,8 +169,13 @@ def cmd_collect(cfg: AppConfig, args) -> int:
 def cmd_list(cfg: AppConfig, args) -> int:
     storage = _open_storage(cfg)
     try:
+        only_new = not args.all
+        # Actionable/category views are review buckets over stored jobs; default to
+        # all matching records so counts align with `stats`/reports (not just "new").
+        if (args.actionable or args.category) and not args.all:
+            only_new = False
         rows = storage.list_jobs(
-            only_new=not args.all,
+            only_new=only_new,
             min_score=args.min_score,
             limit=args.limit if args.limit is not None else cfg.list_limit,
             source_type=args.source,
@@ -618,9 +623,11 @@ def _firecrawl_client(cfg: AppConfig):
     settings = cfg.firecrawl
     budget = FirecrawlBudget(settings.db_path, FirecrawlConfig(
         enabled=settings.enabled, monthly_budget=settings.monthly_budget,
-        soft_limit=settings.soft_limit, hard_limit=settings.hard_limit,
-        absolute_limit=settings.absolute_limit,
+        warning_threshold=settings.warning_threshold,
+        hard_stop_threshold=settings.hard_stop_threshold,
+        absolute_account_limit=settings.absolute_account_limit,
         search_results_default=settings.search_results_default,
+        allow_payg=settings.allow_payg,
         db_path=settings.db_path))
     return budget, FirecrawlCLI(budget)
 
@@ -640,15 +647,19 @@ def cmd_firecrawl(cfg: AppConfig, args) -> int:
                 print(f"  account used:        {account.get('used')}")
             else:
                 print("  account remaining:   unknown (CLI usage API unavailable)")
-            print(f"  local monthly usage: {local['monthly_consumed']:g} "
-                  f"(estimated, not authoritative)")
+            print(f"  local monthly usage: {local['monthly_consumed']:g} (estimated, not authoritative)")
             print(f"  local daily usage:   {local['daily_consumed']:g}")
-            print(f"  budget limit:        {local['budget_limit']:g}")
-            print(f"  budget remaining:    {local['budget_remaining']:g}")
-            print(f"  soft limit:          {local['soft_limit']:g}")
-            print(f"  paused at hard limit:{local['paused']}")
+            print(f"  internal budget limit:{local['budget_limit']:g} (hard_stop/absolute)")
+            print(f"  internal remaining:  {local.get('internal_budget_remaining', local.get('budget_remaining', 0)):g}")
+            print(f"  warning threshold:   {local.get('warning_threshold', local.get('soft_limit', 0)):g}")
+            print(f"  hard stop threshold: {local.get('hard_stop_threshold', local.get('budget_limit', 0)):g}")
+            print(f"  absolute acct limit: {local.get('absolute_account_limit', 'unknown')}")
+            print(f"  allow_payg:          {local.get('allow_payg', False)}")
+            print(f"  paid ops paused:     {local.get('paid_operations_paused', local.get('paused', False))}")
             print(f"  by endpoint:         {local['by_endpoint'] or '{}'}")
             print(f"  by provider:         {local['by_provider'] or '{}'}")
+            print(f"  failed operations:   {local.get('failed_operations', 0)} (credits {local.get('failed_operations_credits', 0):g})")
+            print(f"  unknown operations:  {local.get('unknown_operations', 0)}")
             return 0
 
         if args.action == "auth":

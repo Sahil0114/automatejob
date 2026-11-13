@@ -28,11 +28,27 @@ class BudgetExceeded(RuntimeError):
 class FirecrawlConfig:
     enabled: bool = True
     monthly_budget: int = 1000
-    soft_limit: int = 700
-    hard_limit: int = 800
-    absolute_limit: int = 1000
+    warning_threshold: int = 650
+    hard_stop_threshold: int = 800
+    absolute_account_limit: int = 1000
     search_results_default: int = 10
     db_path: str = "data/firecrawl.db"
+    allow_payg: bool = False
+    # Backward-compatible constructor aliases
+    soft_limit: Optional[int] = None
+    hard_limit: Optional[int] = None
+    absolute_limit: Optional[int] = None
+
+    def __post_init__(self):
+        if self.soft_limit is not None:
+            self.warning_threshold = int(self.soft_limit)
+        if self.hard_limit is not None:
+            self.hard_stop_threshold = int(self.hard_limit)
+        if self.absolute_limit is not None:
+            self.absolute_account_limit = int(self.absolute_limit)
+        self.soft_limit = self.warning_threshold
+        self.hard_limit = self.hard_stop_threshold
+        self.absolute_limit = self.absolute_account_limit
 
 
 _SCHEMA = """
@@ -120,15 +136,20 @@ class FirecrawlBudget:
         """Reserve credits atomically before a CLI request starts."""
         if not self.config.enabled:
             raise BudgetExceeded("Firecrawl is disabled in configuration")
-        limit = min(self.config.monthly_budget, self.config.hard_limit, self.config.absolute_limit)
+        limit = min(self.config.monthly_budget, self.config.hard_stop_threshold, self.config.absolute_account_limit)
         self.conn.execute("BEGIN IMMEDIATE")
         try:
             consumed = self._consumed(_month_prefix())
             if consumed + estimated_credits > limit:
                 self.conn.rollback()
                 raise BudgetExceeded(
-                    f"Firecrawl hard limit {limit:g} would be exceeded: "
+                    f"Firecrawl internal hard stop {limit:g} would be exceeded: "
                     f"{consumed:g} + {estimated_credits:g}")
+            if not self.config.allow_payg and (consumed + estimated_credits > self.config.hard_stop_threshold):
+                self.conn.rollback()
+                raise BudgetExceeded(
+                    f"Paid operations paused at hard stop threshold {self.config.hard_stop_threshold:g} "
+                    f"(allow_payg disabled): {consumed:g} + {estimated_credits:g}")
             cur = self.conn.execute(
                 "INSERT INTO firecrawl_operations (at,endpoint,provider,estimated_credits,status,request_key,note) "
                 "VALUES (?,?,?,?,?,?,?)",
@@ -164,7 +185,7 @@ class FirecrawlBudget:
     def usage(self) -> dict:
         monthly = self._consumed(_month_prefix())
         daily = self._consumed(_day_prefix())
-        limit = min(self.config.monthly_budget, self.config.hard_limit, self.config.absolute_limit)
+        limit = min(self.config.monthly_budget, self.config.hard_stop_threshold, self.config.absolute_account_limit)
         endpoint_rows = self.conn.execute(
             "SELECT endpoint, COALESCE(SUM(COALESCE(actual_credits,estimated_credits)),0) total "
             "FROM firecrawl_operations WHERE at LIKE ? AND status IN ('reserved','completed','unknown') "
@@ -174,16 +195,34 @@ class FirecrawlBudget:
             "FROM firecrawl_operations WHERE at LIKE ? AND provider != '' "
             "AND status IN ('reserved','completed','unknown') GROUP BY provider",
             (_month_prefix() + "%",)).fetchall()
+        status_rows = self.conn.execute(
+            "SELECT status, COUNT(*) AS c, COALESCE(SUM(COALESCE(actual_credits,estimated_credits)),0) total "
+            "FROM firecrawl_operations WHERE at LIKE ? GROUP BY status",
+            (_month_prefix() + "%",)).fetchall()
+        by_status = {r["status"]: {"count": int(r["c"]), "credits": float(r["total"])} for r in status_rows}
+        failed = by_status.get("failed", {"count": 0, "credits": 0.0})
+        unknown = by_status.get("unknown", {"count": 0, "credits": 0.0})
+        paid_paused = (monthly >= limit) or (not self.config.allow_payg and monthly >= self.config.hard_stop_threshold)
         return {
             "monthly_consumed": monthly,
             "daily_consumed": daily,
             "budget_limit": limit,
+            "internal_budget_remaining": max(0.0, limit - monthly),
             "budget_remaining": max(0.0, limit - monthly),
-            "soft_limit": self.config.soft_limit,
+            "warning_threshold": self.config.warning_threshold,
+            "hard_stop_threshold": self.config.hard_stop_threshold,
+            "absolute_account_limit": self.config.absolute_account_limit,
+            "soft_limit": self.config.warning_threshold,
             "paused": monthly >= limit,
+            "paid_operations_paused": paid_paused,
+            "allow_payg": self.config.allow_payg,
             "estimated": True,
             "by_endpoint": {r["endpoint"]: float(r["total"]) for r in endpoint_rows},
             "by_provider": {r["provider"]: float(r["total"]) for r in provider_rows},
+            "failed_operations": failed["count"],
+            "failed_operations_credits": failed["credits"],
+            "unknown_operations": unknown["count"],
+            "by_status": by_status,
         }
 
     def put_cache(self, key: str, payload: dict, expires_at: str = "") -> None:

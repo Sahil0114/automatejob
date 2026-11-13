@@ -67,12 +67,25 @@ class FirecrawlSettings:
     """Firecrawl CLI integration settings (no credential values here)."""
     enabled: bool = True
     monthly_budget: int = 1000
-    soft_limit: int = 700
-    hard_limit: int = 800
-    absolute_limit: int = 1000
+    warning_threshold: int = 650
+    hard_stop_threshold: int = 800
+    absolute_account_limit: int = 1000
     allow_payg: bool = False
     search_results_default: int = 10
     db_path: str = "data/firecrawl.db"
+
+    # Backward-compatible aliases used by existing code/tests.
+    @property
+    def soft_limit(self) -> int:
+        return self.warning_threshold
+
+    @property
+    def hard_limit(self) -> int:
+        return self.hard_stop_threshold
+
+    @property
+    def absolute_limit(self) -> int:
+        return self.absolute_account_limit
 
 
 @dataclass
@@ -138,16 +151,25 @@ class AppConfig:
             relocation=bool(elig_raw.get("relocation", True)),
         )
 
+        fc = raw.get("firecrawl", {}) or {}
+        firecrawl = FirecrawlSettings(
+            enabled=bool(fc.get("enabled", True)),
+            monthly_budget=int(fc.get("monthly_budget", 1000)),
+            warning_threshold=int(fc.get("warning_threshold", fc.get("soft_limit", 650))),
+            hard_stop_threshold=int(fc.get("hard_stop_threshold", fc.get("hard_limit", 800))),
+            absolute_account_limit=int(fc.get("absolute_account_limit", fc.get("absolute_limit", 1000))),
+            allow_payg=bool(fc.get("allow_payg", False)),
+            search_results_default=int(fc.get("search_results_default", 10)),
+            db_path=str(fc.get("db_path", "data/firecrawl.db")),
+        )
+
         return cls(
             sources=sources,
             roles=roles,
             locations=locations,
             scoring=scoring,
             eligibility=eligibility,
-            firecrawl=FirecrawlSettings(**{
-                k: v for k, v in raw.get("firecrawl", {}).items()
-                if k in FirecrawlSettings.__dataclass_fields__
-            }),
+            firecrawl=firecrawl,
             db_path=database.get("path", "data/jobs.db"),
             companies_path=raw.get("companies", {}).get("path", "data/companies.toml"),
             companies_db_path=raw.get("companies", {}).get("db", "data/companies.db"),
