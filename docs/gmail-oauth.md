@@ -13,8 +13,8 @@ Google's official quickstart and configure a desktop OAuth client.
    `~/.config/automatejob/gmail-credentials.json`, and `chmod 600` it.
 
 Scopes actually used (least privilege):
-- `https://www.googleapis.com/auth/gmail.compose` — create/manage drafts
-- (optional) `https://www.googleapis.com/auth/gmail.readonly` — thread/reply detection
+- `https://www.googleapis.com/auth/gmail.compose` — create/manage drafts (and, when explicitly enabled, sending)
+- `https://www.googleapis.com/auth/gmail.readonly` — thread/reply detection and account profile checks
 
 ## 2. Authorize once (interactive step — run manually)
 
@@ -40,15 +40,19 @@ Neither file is ever committed (both are git-ignored). Tokens are never logged.
 ```bash
 export GMAIL_CREDENTIALS_FILE=~/.config/automatejob/gmail-credentials.json
 export GMAIL_TOKEN_FILE=~/.config/automatejob/gmail-token.json
-python3 -m automatejob dashboard --token <your-token>    # create drafts
-python3 -m automatejob dashboard --token <your-token> --enable-send   # send (requires per-message approval)
+python3 -m automatejob gmail-auth                   # one-time, interactive, local only
+python3 -m automatejob dashboard --token <your-token>              # create drafts (no sending)
+python3 -m automatejob dashboard --token <your-token> --enable-send  # allow explicit sends only
 ```
+
+`gmail-auth` verifies the authorized account identity and writes the token with mode `0600`. It is never run by the collector, cron, or dashboard startup.
 
 A draft created in Gmail is NOT a sent email. Sending stays disabled unless
 `--enable-send` is passed AND you explicitly approve the exact recipient,
-subject and body of each message. After OAuth, run `python3 -m automatejob
-gmail-sync` manually to check tracked Gmail threads for replies; it only records
-reply state and suppresses follow-ups, and never sends email.
+subject and body of each message (and confirm the send). After OAuth, run
+`python3 -m automatejob gmail-sync` manually to check tracked Gmail threads for
+replies; it only records reply state and suppresses follow-ups, and never sends
+email. Unknown Gmail state is never treated as "no reply".
 
 ## Without OAuth: copy-email workflow
 
@@ -59,4 +63,8 @@ If you do not configure OAuth, use the manual path:
 3. Click **Mark sent manually** (or `python3 -m automatejob mark-sent --draft-id N`),
    which records the actual send timestamp and starts follow-up tracking.
 
-Follow-ups still require per-message approval and stop on reply/rejection/bounce/opt-out.
+Follow-ups are tracked per sent/manual-sent message (max 2, business days with
+approved holidays). Reply/rejection/bounce/opt-out suppresses them. Follow-up
+drafts require individual approval and are never sent automatically. If you
+send without Gmail (copy-email), mark the draft as sent manually so follow-up
+tracking starts; without a Gmail thread reply sync is manual.

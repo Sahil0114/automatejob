@@ -467,12 +467,22 @@ def cmd_profile(cfg: AppConfig, args) -> int:
                     continue
                 out.confirm_profile(field.strip(), value.strip(), source="cli")
                 print(f"  confirmed {field.strip()}={value.strip()}")
+            confirmed = out.list_profile_confirmations()
         finally:
             out.close()
-        print("Confirmed fields:")
-        for k, v in OutreachStorage(cfg.outreach_db_path).list_profile_confirmations().items():
-            print(f"  {k}: {v}")
+        if confirmed:
+            print("Confirmed fields:")
+            for k, v in confirmed.items():
+                print(f"  {k}: {v}")
         return 0
+
+    out = OutreachStorage(cfg.outreach_db_path)
+    try:
+        confirmed = out.list_profile_confirmations()
+        missing = prof.unverified_fields(out)
+    finally:
+        out.close()
+
     print("Candidate profile:")
     print(f"  name:       {prof.name}")
     print(f"  email:      {prof.email}")
@@ -483,7 +493,10 @@ def cmd_profile(cfg: AppConfig, args) -> int:
     print(f"  experience: {len(prof.experience)} roles (latest: "
           f"{prof.experience[0]['title']} @ {prof.experience[0]['company']})" if prof.experience else "  experience: (none)")
     print(f"  tech:       {', '.join(prof.technologies[:8])}...")
-    missing = prof.unverified_fields()
+    if confirmed:
+        print(f"\nConfirmed overrides ({len(confirmed)}):")
+        for k, v in confirmed.items():
+            print(f"  - {k}: {v}")
     print(f"\nUnverified fields needing confirmation ({len(missing)}):")
     for m in missing:
         print(f"  - {m}")
@@ -491,6 +504,8 @@ def cmd_profile(cfg: AppConfig, args) -> int:
         print("\nConfirm locally with:")
         for m in missing:
             print(f"  python3 -m automatejob profile --confirm {m}=<value>")
+    else:
+        print("  (none — profile confirmations complete)")
     return 0
 
 
@@ -549,9 +564,18 @@ def cmd_draft(cfg: AppConfig, args) -> int:
         for k, v in d["evidence_map"].items():
             print(f"  {k}: {v}")
         if args.save:
-            did = out.create_draft(row["company_id"], args.type, d["subject"], d["body"],
-                                   d["evidence_map"])
-            print(f"\nSaved as draft #{did} (state=draft_ready).")
+            existing = out.conn.execute(
+                "SELECT id FROM outreach_drafts WHERE contact_id IS NULL AND company_id=? "
+                "AND draft_type=? AND subject=? AND body=? AND state NOT IN ('rejected','sent') "
+                "ORDER BY id DESC LIMIT 1",
+                (row["company_id"], args.type, d["subject"], d["body"])).fetchone()
+            if existing:
+                did = existing["id"]
+                print(f"\nReused existing draft #{did} (idempotent; state unchanged).")
+            else:
+                did = out.create_draft(row["company_id"], args.type, d["subject"], d["body"],
+                                       d["evidence_map"])
+                print(f"\nSaved as draft #{did} (state=draft_ready).")
         return 0
     finally:
         out.close()
@@ -865,6 +889,20 @@ def cmd_readiness(cfg: AppConfig, args) -> int:
 def cmd_apply(cfg: AppConfig, args) -> int:
     out = OutreachStorage(cfg.outreach_db_path)
     try:
+        if args.update is not None:
+            try:
+                ok = out.update_application(args.update, status=args.status, notes=args.notes)
+            except ValueError as exc:
+                print(f"Error: {exc}")
+                return 1
+            if not ok:
+                print(f"No application #{args.update}")
+                return 1
+            print(f"Updated application #{args.update}.")
+            return 0
+        if not args.role or not args.applied_at:
+            print("error: --role and --applied-at are required when recording a new application")
+            return 2
         app_id = out.record_application(
             args.company, args.role, args.applied_at,
             company_name=args.company_name or args.company,
@@ -886,6 +924,81 @@ def cmd_applications(cfg: AppConfig, args) -> int:
                 print(f"    notes: {a['notes']}")
         if not out.list_applications():
             print("(no applications recorded)")
+        return 0
+    finally:
+        out.close()
+
+
+def cmd_followups(cfg: AppConfig, args) -> int:
+    out = OutreachStorage(cfg.outreach_db_path)
+    try:
+        if getattr(args, "approve", None) is not None:
+            if out.approve_followup(args.approve):
+                print(f"Approved follow-up #{args.approve}.")
+                return 0
+            print(f"Could not approve follow-up #{args.approve} (not found or not pending).")
+            return 1
+        if getattr(args, "skip", None) is not None:
+            if out.skip_followup(args.skip, args.note or ""):
+                print(f"Skipped follow-up #{args.skip}.")
+                return 0
+            print(f"Could not skip follow-up #{args.skip} (not found or already completed).")
+            return 1
+        if getattr(args, "mark_sent", None) is not None:
+            from datetime import datetime, timezone
+            sent_at = args.sent_at or datetime.now(timezone.utc).isoformat()
+            try:
+                out.mark_followup_sent(args.mark_sent, sent_at)
+                print(f"Marked follow-up #{args.mark_sent} as sent at {sent_at}.")
+                return 0
+            except ValueError as exc:
+                print(f"Error: {exc}")
+                return 1
+            except Exception:
+                print(f"Could not mark follow-up #{args.mark_sent} as sent.")
+                return 1
+        rows = out.list_followups() if getattr(args, "all", False) else (
+            out.list_due_followups() if getattr(args, "due", False) else out.list_followups("pending"))
+        if not rows:
+            print("(no follow-ups)")
+            return 0
+        for f in rows:
+            contact = (f.get("contact_name") or "").strip()
+            company = (f.get("company_name") or f.get("company_id") or "").strip()
+            line = f"#{f['id']} [{f['state']}] FU{f['followup_number']} due {f['due_on']} — {company}"
+            if contact:
+                line += f" / {contact}"
+            print(line)
+            if f.get("reason"):
+                print(f"    reason: {f['reason']}")
+            if f.get("thread_id"):
+                print(f"    thread: {f['thread_id']}")
+        return 0
+    finally:
+        out.close()
+
+
+def cmd_holiday(cfg: AppConfig, args) -> int:
+    out = OutreachStorage(cfg.outreach_db_path)
+    try:
+        if getattr(args, "add", ""):
+            try:
+                added = out.add_holiday(args.add, getattr(args, "note", "") or "")
+            except ValueError as exc:
+                print(f"Error: {exc}")
+                return 1
+            print("Added holiday" if added else "Holiday already exists", args.add)
+            return 0
+        if getattr(args, "remove", ""):
+            removed = out.remove_holiday(args.remove)
+            print("Removed holiday" if removed else "Holiday not found", args.remove)
+            return 0
+        rows = out.list_holidays()
+        if not rows:
+            print("(no holidays configured)")
+        else:
+            for r in rows:
+                print(f"{r['day']}  {r.get('note', '')}".rstrip())
         return 0
     finally:
         out.close()
@@ -1124,19 +1237,36 @@ def build_parser() -> argparse.ArgumentParser:
     prd.add_argument("--limit", type=int, default=20)
     prd.set_defaults(func=cmd_readiness)
 
-    pap = sub.add_parser("apply", help="record a job application")
+    pap = sub.add_parser("apply", help="record or update a job application")
     pap.add_argument("--company", required=True, help="company id/domain/name")
-    pap.add_argument("--role", required=True, help="role title")
-    pap.add_argument("--applied-at", required=True, help="ISO date (e.g. 2026-10-24)")
+    pap.add_argument("--role", default="", help="role title (required when recording)")
+    pap.add_argument("--applied-at", default="", help="ISO date (e.g. 2026-10-24)")
     pap.add_argument("--company-name", default="", help="display name")
     pap.add_argument("--job-url", default="")
     pap.add_argument("--status", default="applied",
                      choices=["applied", "in_review", "interview", "offer", "rejected", "withdrawn"])
     pap.add_argument("--notes", default="")
+    pap.add_argument("--update", type=int, help="update an existing application id instead of creating")
     pap.set_defaults(func=cmd_apply)
 
     papps = sub.add_parser("applications", help="list recorded applications")
     papps.set_defaults(func=cmd_applications)
+
+    pf = sub.add_parser("followups", help="list, approve, skip, mark follow-ups (max 2; never sent automatically)")
+    pf.add_argument("--due", action="store_true", help="list only follow-ups due today or earlier")
+    pf.add_argument("--all", action="store_true", help="list all follow-up states (not only pending)")
+    pf.add_argument("--approve", type=int, metavar="ID", help="approve a pending follow-up")
+    pf.add_argument("--skip", type=int, metavar="ID", help="skip/cancel a pending or approved follow-up")
+    pf.add_argument("--mark-sent", type=int, metavar="ID", help="mark an APPROVED follow-up as sent manually")
+    pf.add_argument("--sent-at", default="", help="actual send time for --mark-sent (ISO 8601; default: now)")
+    pf.add_argument("--note", default="", help="reason for --skip")
+    pf.set_defaults(func=cmd_followups)
+
+    ph = sub.add_parser("holiday", help="add/remove/list approved holidays for follow-up scheduling")
+    ph.add_argument("--add", default="", help="add holiday (YYYY-MM-DD)")
+    ph.add_argument("--remove", default="", help="remove holiday (YYYY-MM-DD)")
+    ph.add_argument("--note", default="", help="note for --add")
+    ph.set_defaults(func=cmd_holiday)
 
     pms = sub.add_parser("mark-sent", help="mark an approved draft as sent manually (copy-email workflow)")
     pms.add_argument("--draft-id", type=int, required=True)

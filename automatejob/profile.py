@@ -101,19 +101,32 @@ class CandidateProfile:
             return self.experience
         raise UnverifiedField(dotted)
 
-    def unverified_fields(self) -> List[str]:
-        """Confirmation checklist of fields still requiring user confirmation."""
+    def unverified_fields(self, outreach=None) -> List[str]:
+        """Confirmation checklist of fields still requiring user confirmation.
+
+        If `outreach` is provided, profile_confirmations recorded via the CLI
+        or dashboard are treated as verified for the listed fields.
+        """
+        confirmed = {}
+        if outreach is not None:
+            try:
+                confirmed = outreach.list_profile_confirmations()
+            except Exception:
+                confirmed = {}
         missing = []
-        if _unverified(self.name):
+        if _unverified(self.name) and "name" not in confirmed:
             missing.append("name")
-        if _unverified(self.email):
+        if _unverified(self.email) and "contact.email" not in confirmed:
             missing.append("contact.email")
-        if _unverified(self.education_summary):
+        if _unverified(self.education_summary) and "education.summary" not in confirmed:
             missing.append("education.summary")
-        if not self.experience:
+        if not self.experience and "experience.entries" not in confirmed:
             missing.append("experience.entries")
         for k in ("notice_period", "availability", "work_authorization"):
-            if _unverified(self.personal.get(k)):
+            val = confirmed.get(k)
+            if val is None:
+                val = self.personal.get(k)
+            if _unverified(val):
                 missing.append(k)
         return missing
 

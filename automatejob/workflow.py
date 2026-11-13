@@ -168,21 +168,30 @@ def send_draft(outreach: OutreachStorage, gmail: GmailAdapter, draft_id: int,
     if row["state"] != "approved":
         return {"ok": False, "status": "not_approved",
                 "detail": "draft must be explicitly approved first"}
-    if not gmail.available():
+    contact_email = (to_addr or "").strip().lower()
+    if outreach.is_suppressed(company_id=row["company_id"], email=contact_email,
+                              contact_id=row["contact_id"]):
+        return {"ok": False, "status": "suppressed",
+                "detail": "company, contact, or email is suppressed"}
+    if not gmail or not gmail.available():
         return {"ok": False, "status": "gmail_unavailable",
                 "detail": "Gmail OAuth not authorized"}
 
-    result = gmail.send(to_addr, row["subject"], row["body"])
+    thread_id = row["gmail_thread_id"] or ""
+    result = gmail.send(to_addr, row["subject"], row["body"], thread_id=thread_id)
     # result: {status: sent|confirmation_unknown|failed, thread_id, message_id}
+    returned_thread = result.get("thread_id", "") or thread_id
     if result.get("status") == "sent":
         msg_id = outreach.record_send(
             draft_id, row["contact_id"], row["company_id"], row["subject"],
-            row["body"], gmail_thread_id=result.get("thread_id", ""),
+            row["body"], gmail_thread_id=returned_thread,
             gmail_message_id=result.get("message_id", ""), status=MSG_SENT)
         outreach.conn.execute(
-            "UPDATE outreach_drafts SET state='sent' WHERE id=?", (draft_id,))
+            "UPDATE outreach_drafts SET state='sent', gmail_thread_id=? WHERE id=?",
+            (returned_thread, draft_id))
         outreach.conn.commit()
-        return {"ok": True, "status": "sent", "message_id": msg_id}
+        return {"ok": True, "status": "sent", "message_id": msg_id,
+                "thread_id": returned_thread}
     if result.get("status") == "confirmation_unknown":
         msg_id = outreach.record_send(
             draft_id, row["contact_id"], row["company_id"], row["subject"],
@@ -191,6 +200,48 @@ def send_draft(outreach: OutreachStorage, gmail: GmailAdapter, draft_id: int,
                 "message_id": msg_id,
                 "detail": "reconcile against Gmail before retrying"}
     return {"ok": False, "status": "failed", "detail": result.get("error", "")}
+
+
+
+def generate_followup_draft(outreach: OutreachStorage, profile: CandidateProfile,
+                            followup_id: int) -> dict:
+    """Generate a reviewable follow-up draft for an approved follow-up task.
+
+    Idempotent per followup task: if a draft is already attached and not
+    rejected/sent, the existing draft id is returned. Drafts require individual
+    approval before any send; nothing is sent here.
+    """
+    fu = outreach.get_followup(followup_id)
+    if fu is None:
+        return {"ok": False, "error": "follow-up not found"}
+    if fu["state"] != "approved":
+        return {"ok": False, "error": "follow-up must be approved before generating a draft"}
+    existing_draft_id = fu.get("draft_id")
+    if existing_draft_id:
+        row = outreach.conn.execute(
+            "SELECT state FROM outreach_drafts WHERE id=?", (existing_draft_id,)).fetchone()
+        if row and row["state"] not in ("rejected",):
+            return {"ok": True, "draft_id": existing_draft_id, "reused": True}
+
+    company = outreach.get_company(fu["company_id"]) or {"name": fu["company_id"], "domain": ""}
+    evidence = outreach.list_evidence(fu["company_id"])
+    contact = outreach.get_contact(fu["contact_id"]) if fu.get("contact_id") else None
+    try:
+        draft = draft_email(
+            profile, company,
+            {"first_name": (contact.get("full_name", "").split()[0] if contact else ""),
+             "role_kind": (contact or {}).get("role_kind", "")},
+            "followup", evidence=evidence)
+    except UnverifiedField as e:
+        return {"ok": False, "error": f"unverified profile field: {e}"}
+
+    draft["evidence_map"]["followup_number"] = str(fu["followup_number"])
+    draft["evidence_map"]["thread_id"] = fu.get("thread_id", "")
+    draft_id, created = outreach.ensure_draft(
+        fu["company_id"], "followup", draft["subject"], draft["body"],
+        draft["evidence_map"], contact_id=fu.get("contact_id"))
+    outreach.attach_followup_draft(followup_id, draft_id)
+    return {"ok": True, "draft_id": draft_id, "reused": not created}
 
 
 def sync_gmail_replies(outreach: OutreachStorage, gmail: GmailAdapter) -> dict:
